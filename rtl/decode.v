@@ -64,10 +64,21 @@ module decode (
     assign IllegalInst = (i_format == 6'b000000);
     assign EBreak = (Inst == 32'h00100073); // System instruction
 
-    // TODO: drive control outputs (currently undriven)
+    // Drive control outputs
     wire [2:0] funct3 = Inst[14:12];
     wire [6:0] funct7 = Inst[31:25];
 
+    assign lui = (opcode == 7'b0110111); // lui
+    assign PcSrc = (opcode == 7'1100111); // jalr
+    assign AluOp = opcode[6:4];
+    assign MemWrite = (opcode == 7'0100011); // store
+    assign MemRead = (opcode == 7'0000011); // load
+    assign MemToReg = MemRead;
+    assign AluSrc1 = (opcode[6:4] != 3'b011);
+    assign AluSrc2 = (opcode[6:4] == 3'b110) || (opcode == 7'b0010111);
+    assign RegWrite = !((opcode == 7'0100011) || (opcode == 7'1100011));
+    assign Jump = (opcode == 7'b1100111) || (opcode == 7'b1101111);
+    assign Branch = (opcode[6:4] == 3'b110); // Jump shouldn't include Branch
 
     // RF
     rf #(.BYPASS_EN(BYPASS_EN)) rf_rw (

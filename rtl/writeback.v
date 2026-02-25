@@ -9,4 +9,14 @@ module writeback (
   output wire [31:0] WriteData
 );
 
+	// (1) jal/jalr: rd <- pc+4
+	// (2) lui:     rd <- U-imm (Offset should already be imm<<12)
+	// (3) load:    rd <- LoadData
+	// (4) default: rd <- AluResult
+
+	assign WriteData = Jump     ? pc_plus4 :
+					   lui      ? Offset   :
+					   MemToReg ? LoadData :
+								  AluResult;
+
 endmodule

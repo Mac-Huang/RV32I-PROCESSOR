@@ -150,7 +150,7 @@ module hart #(
     // Control signals
     wire        lui;     
     wire        PcSrc;   
-    wire [3:0]  AluOp;   
+    wire [2:0]  AluOp;   
     wire        MemWrite;
     wire        MemRead; 
     wire        MemToReg;
@@ -330,7 +330,7 @@ module hart #(
     //
     // Inputs:
     //   CONTROLs:
-    //     AluOp      [3:0]
+    //     AluOp      [2:0]
     //
     //   DATA:
     //     Operand1   [31:0]
@@ -357,7 +357,6 @@ module hart #(
         .ALUeq     (ALUeq),
         .ALUslt    (ALUslt)
     );
-
 
     // =========================================================================
     // 4) MEMORY
