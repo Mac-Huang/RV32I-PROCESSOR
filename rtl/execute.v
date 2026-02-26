@@ -1,5 +1,5 @@
 module execute (
-    input  wire [3:0]  AluOp,
+    input  wire [2:0]  AluOp,
     input  wire [2:0]  Func3,
     input  wire [6:0]  Func7,
     input  wire [6:0]  opcode,      // optional but handy for shifts/sub, etc.

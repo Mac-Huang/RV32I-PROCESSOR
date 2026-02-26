@@ -159,8 +159,8 @@ module hart #(
     // Both RegWrite are the same before being pipelined
     wire        EX_RegWrite;
     wire        WB_RegWrite;
-    wire [3:0]  EX_WriteAddr;
-    wire [3:0]  WB_WriteAddr;
+    wire [4:0]  EX_WriteAddr;
+    wire [4:0]  WB_WriteAddr;
     wire        Jump;    
     wire        Branch;  
 
@@ -223,7 +223,7 @@ module hart #(
 
     // PC flop: single-cycle retires each cycle unless reset/stop.
     // NOTE: if you want halt to freeze, gate update with ~EBreak.
-    always_ff @(posedge i_clk) begin
+    always @(posedge i_clk) begin
         if (i_rst) pc <= RESET_ADDR;
         else if (EBreak) pc <= pc;      // freeze
         else pc <= NextPC;
@@ -231,7 +231,6 @@ module hart #(
 
     // NextPC to be computed below
     // Jump/Branch logic is seperated for future pipelining
-    wire BranchTaken;
     assign BranchTaken = 
         (Func3 == 3'b000) ?  ALUeq :
         (Func3 == 3'b001) ? ~ALUeq :
@@ -249,7 +248,14 @@ module hart #(
     wire [31:0] nextpc_raw  = nextpc_base + nextpc_add;
 
     // JALR requires bit0 = 0 (RISC-V spec)
-    assign NextPC = (do_jump & PcSrc) ? (nextpc_raw & 32'hFFFF_FFFE) : nextpc_raw;
+    wire [31:0] nextpc_masked = (do_jump & PcSrc) ? (nextpc_raw & 32'hFFFF_FFFE) : nextpc_raw;
+    assign NextPC = nextpc_masked;
+
+    // Instruction address must be 4-byte aligned for RV32I (no C extension).
+    wire MisalignPC = (do_jump | do_branch) & (nextpc_masked[1:0] != 2'b00);
+
+    assign o_retire_next_pc = NextPC;
+    assign o_retire_trap    = IllegalInst | MisalignTrap | MisalignPC;
 
     // =========================================================================
     // 2) DECODE MODULE (COMBINATIONAL) — control + reg addrs + imm
@@ -279,7 +285,7 @@ module hart #(
       .Inst             (Inst),
       // NOTICE!! The writedata in pipeline should be 3 stages later than the readdata! 
       .WriteData        (WriteData),
-      .WriteAddr        (WB_WriteAdd),
+      .WriteAddr        (WB_WriteAddr),
       .WriteEn          (WB_RegWrite),
     
       .lui              (lui),

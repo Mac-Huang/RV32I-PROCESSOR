@@ -38,31 +38,55 @@ module rf #(
     input  wire [31:0] i_rd_wdata
 );
 
-
     reg [31:0] regs [0:31];
-    integer idx;
 
-    // Verilog-2001 function style
-    function [31:0] rdata;
-        input [4:0] raddr;
-        begin
-            if (raddr == 5'd0) begin
-                rdata = 32'd0;
-            end else if (BYPASS_EN && i_rd_wen && (i_rd_waddr != 5'd0) && (raddr == i_rd_waddr)) begin
-                rdata = i_rd_wdata;
-            end else begin
-                rdata = regs[raddr];
-            end
-        end
-    endfunction
+    wire rs1_bypass_hit = BYPASS_EN && i_rd_wen && (i_rd_waddr != 5'd0) && (i_rs1_raddr == i_rd_waddr);
+    wire rs2_bypass_hit = BYPASS_EN && i_rd_wen && (i_rd_waddr != 5'd0) && (i_rs2_raddr == i_rd_waddr);
 
-    assign o_rs1_rdata = rdata(i_rs1_raddr);
-    assign o_rs2_rdata = rdata(i_rs2_raddr);
+    assign o_rs1_rdata = i_rst                ? 32'd0 :
+                         (i_rs1_raddr == 5'd0)? 32'd0 :
+                         rs1_bypass_hit       ? i_rd_wdata :
+                                                regs[i_rs1_raddr];
+
+    assign o_rs2_rdata = i_rst                ? 32'd0 :
+                         (i_rs2_raddr == 5'd0)? 32'd0 :
+                         rs2_bypass_hit       ? i_rd_wdata :
+                                                regs[i_rs2_raddr];
 
     always @(posedge i_clk) begin
         if (i_rst) begin
-            for (idx = 0; idx < 32; idx = idx + 1)
-                regs[idx] <= 32'd0;
+            regs[ 0] <= 32'd0;
+            regs[ 1] <= 32'd0;
+            regs[ 2] <= 32'd0;
+            regs[ 3] <= 32'd0;
+            regs[ 4] <= 32'd0;
+            regs[ 5] <= 32'd0;
+            regs[ 6] <= 32'd0;
+            regs[ 7] <= 32'd0;
+            regs[ 8] <= 32'd0;
+            regs[ 9] <= 32'd0;
+            regs[10] <= 32'd0;
+            regs[11] <= 32'd0;
+            regs[12] <= 32'd0;
+            regs[13] <= 32'd0;
+            regs[14] <= 32'd0;
+            regs[15] <= 32'd0;
+            regs[16] <= 32'd0;
+            regs[17] <= 32'd0;
+            regs[18] <= 32'd0;
+            regs[19] <= 32'd0;
+            regs[20] <= 32'd0;
+            regs[21] <= 32'd0;
+            regs[22] <= 32'd0;
+            regs[23] <= 32'd0;
+            regs[24] <= 32'd0;
+            regs[25] <= 32'd0;
+            regs[26] <= 32'd0;
+            regs[27] <= 32'd0;
+            regs[28] <= 32'd0;
+            regs[29] <= 32'd0;
+            regs[30] <= 32'd0;
+            regs[31] <= 32'd0;
         end else if (i_rd_wen && (i_rd_waddr != 5'd0)) begin
             regs[i_rd_waddr] <= i_rd_wdata;
         end
