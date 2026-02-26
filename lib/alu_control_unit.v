@@ -25,7 +25,8 @@ module alu_control_unit (
                     AluControl_arith    = 1'b0;
                 end else begin
                     AluControl_opsel = Func3;
-                    AluControl_sub = (Func3 == 3'b000) && Func7[5];
+                    // Only R-type SUB uses funct7[5] as subtract control.
+                    AluControl_sub = (opcode == 7'b0110011) && (Func3 == 3'b000) && Func7[5];
                     AluControl_unsigned = (Func3 == 3'b011);
                     AluControl_arith = (Func3 == 3'b101) && Func7[5];
                 end
@@ -39,13 +40,18 @@ module alu_control_unit (
                 AluControl_arith    = 1'b0;
             end
 
-            3'b110: begin // Conditional Branch
-                // force substraction
-                AluControl_opsel    = 3'b000;
-                AluControl_sub      = 1'b1;
-
-                AluControl_unsigned = Func3[1];
-                AluControl_arith    = 1'b0;
+            3'b110: begin // Conditional Branch / Jump
+                AluControl_opsel = 3'b000;
+                if (opcode == 7'b1100011) begin
+                    // Branch compares use subtraction + signed/unsigned select.
+                    AluControl_sub      = 1'b1;
+                    AluControl_unsigned = Func3[1];
+                end else begin
+                    // JAL/JALR default to ADD behavior.
+                    AluControl_sub      = 1'b0;
+                    AluControl_unsigned = 1'b0;
+                end
+                AluControl_arith = 1'b0;
             end
 
             default: begin
