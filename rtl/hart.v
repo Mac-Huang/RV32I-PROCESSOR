@@ -1,3 +1,5 @@
+`default_nettype none
+
 module hart #(
     // After reset, the program counter (PC) should be initialized to this
     // address and start executing instructions from there.
@@ -72,7 +74,7 @@ module hart #(
     // address, for the bytes enabled by the mask. When read enable is not
     // asserted, or for bytes not set in the mask, the value is undefined.
     input  wire [31:0] i_dmem_rdata,
-	// The output `retire` interface is used to signal to the testbench that
+    // The output `retire` interface is used to signal to the testbench that
     // the CPU has completed and retired an instruction. A single cycle
     // implementation will assert this every cycle; however, a pipelined
     // implementation that needs to stall (due to internal hazards or waiting
@@ -118,6 +120,12 @@ module hart #(
     // writeback stage by this instruction. If rd is 5'd0, this field is
     // ignored and can be treated as a don't care.
     output wire [31:0] o_retire_rd_wdata,
+    output wire [31:0] o_retire_dmem_addr,
+    output wire        o_retire_dmem_ren,
+    output wire        o_retire_dmem_wen,
+    output wire [ 3:0] o_retire_dmem_mask,
+    output wire [31:0] o_retire_dmem_wdata,
+    output wire [31:0] o_retire_dmem_rdata,
     // The current program counter of the instruction being retired - i.e.
     // the instruction memory address that the instruction was fetched from.
     output wire [31:0] o_retire_pc,
@@ -125,315 +133,789 @@ module hart #(
     // instructions, this is `o_retire_pc + 4`, but must be the branch or jump
     // target for *taken* branches and jumps.
     output wire [31:0] o_retire_next_pc
-
 `ifdef RISCV_FORMAL
-    ,`RVFI_OUTPUTS,
+    ,`RVFI_OUTPUTS
 `endif
 );
 
-    // =========================================================================
-    // 0) TOP-LEVEL INTERNAL WIRES / STATE
-    // =========================================================================
+    // -------------------------------------------------------------------------
+    // Global state
+    // -------------------------------------------------------------------------
+    reg [31:0] pc_cur;
+    reg        halted_cur;
 
-    // PC register
-    reg  [31:0] pc;
+    // -------------------------------------------------------------------------
+    // IF stage + IF/ID register
+    // -------------------------------------------------------------------------
+    wire [31:0] if_pc_cur;
+    wire [31:0] if_pc_plus4_cur;
+    wire [31:0] if_inst_cur;
+    wire [31:0] pc_next;
 
-    // Instruction word (fetched)
-    wire [31:0] Inst;            // alias for i_imem_rdata in core
-    assign Inst = i_imem_rdata;
+    reg         if_id_valid_cur;
+    reg  [31:0] if_id_pc_cur;
+    reg  [31:0] if_id_pc_plus4_cur;
+    reg  [31:0] if_id_inst_cur;
 
-    // Basic fields
-    wire [6:0] opcode;
-    wire [2:0] Func3;
-    wire [6:0] Func7;
+    wire        if_id_valid_next;
+    wire [31:0] if_id_pc_next;
+    wire [31:0] if_id_pc_plus4_next;
+    wire [31:0] if_id_inst_next;
 
-    // Control signals
-    wire        lui;     
-    wire        PcSrc;   
-    wire [2:0]  AluOp;   
-    wire        MemWrite;
-    wire        MemRead; 
-    wire        MemToReg;
-    wire        AluSrc1; 
-    wire        AluSrc2;
-    // Both RegWrite are the same before being pipelined
-    wire        EX_RegWrite;
-    wire        WB_RegWrite;
-    wire [4:0]  EX_WriteAddr;
-    wire [4:0]  WB_WriteAddr;
-    wire        Jump;    
-    wire        Branch;  
+    // -------------------------------------------------------------------------
+    // ID stage + ID/EX register
+    // -------------------------------------------------------------------------
+    wire        id_lui_cur;
+    wire        id_pc_src_cur;
+    wire [2:0]  id_alu_op_cur;
+    wire        id_mem_write_cur;
+    wire        id_mem_read_cur;
+    wire        id_mem_to_reg_cur;
+    wire        id_alu_src1_cur;
+    wire        id_alu_src2_cur;
+    wire        id_reg_write_cur;
+    wire        id_jump_cur;
+    wire        id_branch_cur;
+    wire [31:0] id_offset_cur;
+    wire [4:0]  id_rs1_raddr_cur;
+    wire [4:0]  id_rs2_raddr_cur;
+    wire [4:0]  id_rd_waddr_cur;
+    wire [31:0] id_rs1_rdata_cur;
+    wire [31:0] id_rs2_rdata_cur;
+    wire        id_illegal_inst_cur;
+    wire        id_ebreak_cur;
 
-    // Immediate
-    wire [31:0] Offset;          // output of Immediate Generator
+    reg         id_ex_valid_cur;
+    reg  [31:0] id_ex_pc_cur;
+    reg  [31:0] id_ex_pc_plus4_cur;
+    reg  [31:0] id_ex_inst_cur;
+    reg  [4:0]  id_ex_rs1_raddr_cur;
+    reg  [4:0]  id_ex_rs2_raddr_cur;
+    reg  [4:0]  id_ex_rd_waddr_cur;
+    reg  [31:0] id_ex_rs1_rdata_cur;
+    reg  [31:0] id_ex_rs2_rdata_cur;
+    reg  [31:0] id_ex_offset_cur;
+    reg  [6:0]  id_ex_opcode_cur;
+    reg  [2:0]  id_ex_func3_cur;
+    reg  [6:0]  id_ex_func7_cur;
+    reg         id_ex_lui_cur;
+    reg         id_ex_pc_src_cur;
+    reg  [2:0]  id_ex_alu_op_cur;
+    reg         id_ex_mem_write_cur;
+    reg         id_ex_mem_read_cur;
+    reg         id_ex_mem_to_reg_cur;
+    reg         id_ex_alu_src1_cur;
+    reg         id_ex_alu_src2_cur;
+    reg         id_ex_reg_write_cur;
+    reg         id_ex_jump_cur;
+    reg         id_ex_branch_cur;
+    reg         id_ex_illegal_inst_cur;
+    reg         id_ex_ebreak_cur;
 
-    // Register file connections
-    // Read addresses: from decode
-    // Write address: from decode
-    // Read data: from regfile
-    wire [4:0]  rs1_raddr = o_retire_rs1_raddr;
-    wire [4:0]  rs2_raddr = o_retire_rs2_raddr;
-    wire [4:0]  rd_waddr  = o_retire_rd_waddr;
+    wire        id_ex_valid_next;
+    wire [31:0] id_ex_pc_next;
+    wire [31:0] id_ex_pc_plus4_next;
+    wire [31:0] id_ex_inst_next;
+    wire [4:0]  id_ex_rs1_raddr_next;
+    wire [4:0]  id_ex_rs2_raddr_next;
+    wire [4:0]  id_ex_rd_waddr_next;
+    wire [31:0] id_ex_rs1_rdata_next;
+    wire [31:0] id_ex_rs2_rdata_next;
+    wire [31:0] id_ex_offset_next;
+    wire [6:0]  id_ex_opcode_next;
+    wire [2:0]  id_ex_func3_next;
+    wire [6:0]  id_ex_func7_next;
+    wire        id_ex_lui_next;
+    wire        id_ex_pc_src_next;
+    wire [2:0]  id_ex_alu_op_next;
+    wire        id_ex_mem_write_next;
+    wire        id_ex_mem_read_next;
+    wire        id_ex_mem_to_reg_next;
+    wire        id_ex_alu_src1_next;
+    wire        id_ex_alu_src2_next;
+    wire        id_ex_reg_write_next;
+    wire        id_ex_jump_next;
+    wire        id_ex_branch_next;
+    wire        id_ex_illegal_inst_next;
+    wire        id_ex_ebreak_next;
 
-    // Operand mux outputs
-    wire [31:0] Operand1;
-    wire [31:0] Operand2;
+    // -------------------------------------------------------------------------
+    // EX stage + EX/MEM register
+    // -------------------------------------------------------------------------
+    wire [31:0] ex_operand1_cur;
+    wire [31:0] ex_operand2_cur;
+    wire [31:0] ex_alu_result_cur;
+    wire        ex_alu_eq_cur;
+    wire        ex_alu_slt_cur;
+    wire        ex_branch_taken_cur;
+    wire        ex_jump_taken_cur;
+    wire        ex_control_taken_cur;
+    wire [31:0] ex_branch_target_cur;
+    wire [31:0] ex_jump_target_raw_cur;
+    wire [31:0] ex_jump_target_cur;
+    wire [31:0] ex_control_target_cur;
+    wire        ex_pc_misalign_trap_cur;
+    wire        ex_redirect_cur;
+    wire [31:0] ex_next_pc_cur;
 
-    // ALU outputs from alu.v module
-    wire [31:0] AluResult;
-    wire        ALUeq;      
-    wire        ALUslt;             
+    reg         ex_mem_valid_cur;
+    reg  [31:0] ex_mem_pc_cur;
+    reg  [31:0] ex_mem_pc_plus4_cur;
+    reg  [31:0] ex_mem_next_pc_cur;
+    reg  [31:0] ex_mem_inst_cur;
+    reg  [4:0]  ex_mem_rs1_raddr_cur;
+    reg  [4:0]  ex_mem_rs2_raddr_cur;
+    reg  [4:0]  ex_mem_rd_waddr_cur;
+    reg  [31:0] ex_mem_rs1_rdata_cur;
+    reg  [31:0] ex_mem_rs2_rdata_cur;
+    reg  [31:0] ex_mem_offset_cur;
+    reg  [31:0] ex_mem_alu_result_cur;
+    reg  [31:0] ex_mem_store_data_cur;
+    reg  [2:0]  ex_mem_func3_cur;
+    reg         ex_mem_mem_write_cur;
+    reg         ex_mem_mem_read_cur;
+    reg         ex_mem_mem_to_reg_cur;
+    reg         ex_mem_lui_cur;
+    reg         ex_mem_jump_cur;
+    reg         ex_mem_reg_write_cur;
+    reg         ex_mem_illegal_inst_cur;
+    reg         ex_mem_pc_misalign_trap_cur;
+    reg         ex_mem_ebreak_cur;
 
-    // =========================================================================
-    // LSU pack/unpack intermediates
-    wire [31:0] EffAddr;          // effective address (usually AluResult)
-    assign EffAddr = AluResult;
+    wire        ex_mem_valid_next;
+    wire [31:0] ex_mem_pc_next;
+    wire [31:0] ex_mem_pc_plus4_next;
+    wire [31:0] ex_mem_next_pc_next;
+    wire [31:0] ex_mem_inst_next;
+    wire [4:0]  ex_mem_rs1_raddr_next;
+    wire [4:0]  ex_mem_rs2_raddr_next;
+    wire [4:0]  ex_mem_rd_waddr_next;
+    wire [31:0] ex_mem_rs1_rdata_next;
+    wire [31:0] ex_mem_rs2_rdata_next;
+    wire [31:0] ex_mem_offset_next;
+    wire [31:0] ex_mem_alu_result_next;
+    wire [31:0] ex_mem_store_data_next;
+    wire [2:0]  ex_mem_func3_next;
+    wire        ex_mem_mem_write_next;
+    wire        ex_mem_mem_read_next;
+    wire        ex_mem_mem_to_reg_next;
+    wire        ex_mem_lui_next;
+    wire        ex_mem_jump_next;
+    wire        ex_mem_reg_write_next;
+    wire        ex_mem_illegal_inst_next;
+    wire        ex_mem_pc_misalign_trap_next;
+    wire        ex_mem_ebreak_next;
 
-    wire [31:0] LoadData;         // unpacked + sign/zero-extended load value
+    // -------------------------------------------------------------------------
+    // MEM stage + MEM/WB register
+    // -------------------------------------------------------------------------
+    wire        mem_read_en_cur;
+    wire        mem_write_en_cur;
+    wire [31:0] mem_dmem_addr_cur;
+    wire [3:0]  mem_dmem_mask_cur;
+    wire [31:0] mem_dmem_wdata_cur;
+    wire        mem_dmem_ren_cur;
+    wire        mem_dmem_wen_cur;
+    wire [31:0] mem_load_data_cur;
+    wire        mem_misalign_trap_cur;
 
-    // Writeback bus
-    wire [31:0] WriteData;         // final data to regfile (also o_retire_rd_wdata)
+    reg         mem_wb_valid_cur;
+    reg  [31:0] mem_wb_pc_cur;
+    reg  [31:0] mem_wb_pc_plus4_cur;
+    reg  [31:0] mem_wb_next_pc_cur;
+    reg  [31:0] mem_wb_inst_cur;
+    reg  [4:0]  mem_wb_rs1_raddr_cur;
+    reg  [4:0]  mem_wb_rs2_raddr_cur;
+    reg  [4:0]  mem_wb_rd_waddr_cur;
+    reg  [31:0] mem_wb_rs1_rdata_cur;
+    reg  [31:0] mem_wb_rs2_rdata_cur;
+    reg  [31:0] mem_wb_offset_cur;
+    reg  [31:0] mem_wb_alu_result_cur;
+    reg  [31:0] mem_wb_load_data_cur;
+    reg  [31:0] mem_wb_dmem_addr_cur;
+    reg         mem_wb_dmem_ren_cur;
+    reg         mem_wb_dmem_wen_cur;
+    reg  [3:0]  mem_wb_dmem_mask_cur;
+    reg  [31:0] mem_wb_dmem_wdata_cur;
+    reg  [31:0] mem_wb_dmem_rdata_cur;
+    reg         mem_wb_mem_to_reg_cur;
+    reg         mem_wb_lui_cur;
+    reg         mem_wb_jump_cur;
+    reg         mem_wb_reg_write_cur;
+    reg         mem_wb_illegal_inst_cur;
+    reg         mem_wb_pc_misalign_trap_cur;
+    reg         mem_wb_misalign_trap_cur;
+    reg         mem_wb_ebreak_cur;
 
-    // Next PC logic
-    wire [31:0] pc_plus4 = pc + 32'd4;
-    wire [31:0] NextPC;
-    wire        BranchTaken;       // computed from branch/jump unit
+    wire        mem_wb_valid_next;
+    wire [31:0] mem_wb_pc_next;
+    wire [31:0] mem_wb_pc_plus4_next;
+    wire [31:0] mem_wb_next_pc_next;
+    wire [31:0] mem_wb_inst_next;
+    wire [4:0]  mem_wb_rs1_raddr_next;
+    wire [4:0]  mem_wb_rs2_raddr_next;
+    wire [4:0]  mem_wb_rd_waddr_next;
+    wire [31:0] mem_wb_rs1_rdata_next;
+    wire [31:0] mem_wb_rs2_rdata_next;
+    wire [31:0] mem_wb_offset_next;
+    wire [31:0] mem_wb_alu_result_next;
+    wire [31:0] mem_wb_load_data_next;
+    wire [31:0] mem_wb_dmem_addr_next;
+    wire        mem_wb_dmem_ren_next;
+    wire        mem_wb_dmem_wen_next;
+    wire [3:0]  mem_wb_dmem_mask_next;
+    wire [31:0] mem_wb_dmem_wdata_next;
+    wire [31:0] mem_wb_dmem_rdata_next;
+    wire        mem_wb_mem_to_reg_next;
+    wire        mem_wb_lui_next;
+    wire        mem_wb_jump_next;
+    wire        mem_wb_reg_write_next;
+    wire        mem_wb_illegal_inst_next;
+    wire        mem_wb_pc_misalign_trap_next;
+    wire        mem_wb_misalign_trap_next;
+    wire        mem_wb_ebreak_next;
 
-    // Trap/halt (retire)
-    wire        IllegalInst;       // decoder says illegal
-    wire        MisalignTrap;      // LSU / PC target misalign
-    wire        EBreak;            // decoder says ebreak
+    // -------------------------------------------------------------------------
+    // WB stage
+    // -------------------------------------------------------------------------
+    wire [31:0] wb_write_data_cur;
+    wire        wb_trap_cur;
+    wire        wb_write_enable_cur;
+    wire        retire_halt_cur;
+    wire [6:0]  id_opcode_cur;
+    wire        id_rs1_used_cur;
+    wire        id_rs2_used_cur;
+    wire        hazard_ex_cur;
+    wire        hazard_mem_cur;
+    wire        hazard_wb_cur;
+    wire        hazard_stall_cur;
 
-    assign o_imem_raddr   = pc;
-    assign o_retire_pc    = pc;
-    assign o_retire_inst  = Inst;
-    assign o_retire_valid = ~i_rst;
-    assign o_retire_halt  = EBreak;
+    // -------------------------------------------------------------------------
+    // IF stage
+    // -------------------------------------------------------------------------
+    assign if_pc_cur       = pc_cur;
+    assign if_pc_plus4_cur = pc_cur + 32'd4;
+    assign if_inst_cur     = i_imem_rdata;
+    assign pc_next         = ex_redirect_cur ? ex_control_target_cur : if_pc_plus4_cur;
 
-    assign opcode = Inst[6:0];
-    assign Func3  = Inst[14:12];
-    assign Func7  = Inst[31:25];
+    assign o_imem_raddr = if_pc_cur;
 
-    // =========================================================================
-    // 1) PC REGISTER + INSTRUCTION FETCH "MODULE"
-    // =========================================================================
-    // Spec: Instruction memory is combinational read.
-    // - Provide address = pc (4-byte aligned expected)
-    // - Receive Inst = i_imem_rdata same cycle
+    assign if_id_valid_next    = 1'b1;
+    assign if_id_pc_next       = if_pc_cur;
+    assign if_id_pc_plus4_next = if_pc_plus4_cur;
+    assign if_id_inst_next     = if_inst_cur;
 
-    // PC flop: single-cycle retires each cycle unless reset/stop.
-    // NOTE: if you want halt to freeze, gate update with ~EBreak.
-    always @(posedge i_clk) begin
-        if (i_rst) pc <= RESET_ADDR;
-        else if (EBreak) pc <= pc;      // freeze
-        else pc <= NextPC;
-    end
-
-    // NextPC to be computed below
-    // Jump/Branch logic is seperated for future pipelining
-    assign BranchTaken = 
-        (Func3 == 3'b000) ?  ALUeq :
-        (Func3 == 3'b001) ? ~ALUeq :
-        (Func3 == 3'b100) ?  ALUslt :
-        (Func3 == 3'b101) ? ~ALUslt :
-        (Func3 == 3'b110) ?  ALUslt :
-        (Func3 == 3'b111) ? ~ALUslt :
-        1'b0;
-
-    wire do_branch = Branch & BranchTaken;
-    wire do_jump   = Jump;
-
-    wire [31:0] nextpc_base = PcSrc ? o_retire_rs1_rdata : pc;
-    wire [31:0] nextpc_add  = (do_jump | do_branch) ? Offset : 32'd4;
-    wire [31:0] nextpc_raw  = nextpc_base + nextpc_add;
-
-    // JALR requires bit0 = 0 (RISC-V spec)
-    wire [31:0] nextpc_masked = (do_jump & PcSrc) ? (nextpc_raw & 32'hFFFF_FFFE) : nextpc_raw;
-    assign NextPC = nextpc_masked;
-
-    // Instruction address must be 4-byte aligned for RV32I (no C extension).
-    wire MisalignPC = (do_jump | do_branch) & (nextpc_masked[1:0] != 2'b00);
-
-    assign o_retire_next_pc = NextPC;
-    assign o_retire_trap    = IllegalInst | MisalignTrap | MisalignPC;
-
-    // =========================================================================
-    // 2) DECODE MODULE (COMBINATIONAL) — control + reg addrs + imm
-    // =========================================================================
-    //
-    // Inputs:
-    //   - i_clk, i_rst, Inst (32-bit), WriteData, WB_RegWrite
-    //
-    // Outputs:
-    //   - CONTROLs:
-    //       lui, PcSrc, AluOp,
-    //       MemWrite, MemRead, MemToReg,
-    //       AluSrc1, AluSrc2,
-    //       EX_RegWrite, Jump, Branch
-    //
-    //   - Retire register fields (already “semantic”, already zeroed when unused):
-    //       o_retire_rs1_raddr, o_retire_rs2_raddr, o_retire_rd_waddr
-    //       o_retire_rs1_rdata, o_retire_rs2_rdata
-    //
-    //   - Exception flags:
-    //       IllegalInst, EBreak
-    //
-
+    // -------------------------------------------------------------------------
+    // ID stage
+    // -------------------------------------------------------------------------
     decode #(.BYPASS_EN(0)) u_decode (
-      .i_clk            (i_clk),
-      .i_rst            (i_rst),
-      .Inst             (Inst),
-      // NOTICE!! The writedata in pipeline should be 3 stages later than the readdata! 
-      .WriteData        (WriteData),
-      .WriteAddr        (WB_WriteAddr),
-      .WriteEn          (WB_RegWrite),
-    
-      .lui              (lui),
-      .PcSrc            (PcSrc),
-      .AluOp            (AluOp),
-      .MemWrite         (MemWrite),
-      .MemRead          (MemRead),
-      .MemToReg         (MemToReg),
-      .AluSrc1          (AluSrc1),
-      .AluSrc2          (AluSrc2),
-      .RegWrite         (EX_RegWrite),
-      .Jump             (Jump),
-      .Branch           (Branch),
-
-      .Offset           (Offset),
-    
-      .o_retire_rs1_raddr(o_retire_rs1_raddr),
-      .o_retire_rs2_raddr(o_retire_rs2_raddr),
-      .o_retire_rd_waddr (o_retire_rd_waddr), // EX_WriteAddr
-      .o_retire_rs1_rdata(o_retire_rs1_rdata),
-      .o_retire_rs2_rdata(o_retire_rs2_rdata),
-    
-      .IllegalInst      (IllegalInst),
-      .EBreak           (EBreak)
+        .i_clk              (i_clk),
+        .i_rst              (i_rst),
+        .Inst               (if_id_inst_cur),
+        .WriteData          (wb_write_data_cur),
+        .WriteAddr          (mem_wb_rd_waddr_cur),
+        .WriteEn            (wb_write_enable_cur),
+        .lui                (id_lui_cur),
+        .PcSrc              (id_pc_src_cur),
+        .AluOp              (id_alu_op_cur),
+        .MemWrite           (id_mem_write_cur),
+        .MemRead            (id_mem_read_cur),
+        .MemToReg           (id_mem_to_reg_cur),
+        .AluSrc1            (id_alu_src1_cur),
+        .AluSrc2            (id_alu_src2_cur),
+        .RegWrite           (id_reg_write_cur),
+        .Jump               (id_jump_cur),
+        .Branch             (id_branch_cur),
+        .Offset             (id_offset_cur),
+        .o_retire_rs1_raddr (id_rs1_raddr_cur),
+        .o_retire_rs2_raddr (id_rs2_raddr_cur),
+        .o_retire_rd_waddr  (id_rd_waddr_cur),
+        .o_retire_rs1_rdata (id_rs1_rdata_cur),
+        .o_retire_rs2_rdata (id_rs2_rdata_cur),
+        .IllegalInst        (id_illegal_inst_cur),
+        .EBreak             (id_ebreak_cur)
     );
 
-    assign EX_WriteAddr = o_retire_rd_waddr; 
-    assign WB_WriteAddr = EX_WriteAddr; 
-    assign WB_RegWrite  = EX_RegWrite; // It's the same in one cycle design
-    // It might be confusing that EX_RegWrite is the output while
-    // WB_RegWrite is the input. Then how come assign the output to the input.
-    // The answer is that it's asynchronous when the Instruction decoder
-    // decoding the instruction to controls (RegRead), and the write reg is synchronous,
-    // which is not triggered before `assign WB_RegWrite = EX_RegWrite;`
+    assign id_opcode_cur = if_id_inst_cur[6:0];
 
-    // I seperate 2 AluSrc Mux from Exeecute Module
-    // because these two mux will be modified for pipelined
-    assign Operand1 = AluSrc1 ? o_retire_pc : o_retire_rs1_rdata;
-    assign Operand2 = AluSrc2 ? Offset      : o_retire_rs2_rdata;
+    assign id_rs1_used_cur = (id_opcode_cur == 7'b0110011) |  // R-type
+                             (id_opcode_cur == 7'b0010011) |  // I-type ALU
+                             (id_opcode_cur == 7'b0000011) |  // load
+                             (id_opcode_cur == 7'b0100011) |  // store
+                             (id_opcode_cur == 7'b1100011) |  // branch
+                             (id_opcode_cur == 7'b1100111);   // jalr
 
-    // =========================================================================
-    // 3) EXECUTE MODULE — ALU CONTROL UNIT + ALU
-    // =========================================================================
-    //
-    // Goal:
-    //   - Turn decoded AluOp into the *actual* ALU control pins required by alu.v
-    //   - Compute AluResult + flags (ALUeq, ALUslt)
-    //
-    // Inputs:
-    //   CONTROLs:
-    //     AluOp      [2:0]
-    //
-    //   DATA:
-    //     Operand1   [31:0]
-    //     Operand2   [31:0]
-    //
-    //   INST bits needed for ALU-control refinement:
-    //     Func3      [2:0]
-    //     Func7      [6:0]
-    //     opcode     [6:0] (optional, depends on how you encoded AluOp)
-    //
-    // Outputs:
-    //   AluResult  [31:0]  (goes to EffAddr for loads/stores; also WB for ALU ops)
-    //   ALUeq              (branch compare eq)
-    //   ALUslt             (branch compare lt/slt result depending on unsigned control)
+    assign id_rs2_used_cur = (id_opcode_cur == 7'b0110011) |  // R-type
+                             (id_opcode_cur == 7'b0100011) |  // store
+                             (id_opcode_cur == 7'b1100011);   // branch
+
+    assign hazard_ex_cur = if_id_valid_cur &
+                           id_ex_valid_cur &
+                           id_ex_reg_write_cur &
+                           (id_ex_rd_waddr_cur != 5'd0) &
+                           ((id_rs1_used_cur & (id_rs1_raddr_cur == id_ex_rd_waddr_cur)) |
+                            (id_rs2_used_cur & (id_rs2_raddr_cur == id_ex_rd_waddr_cur)));
+
+    assign hazard_mem_cur = if_id_valid_cur &
+                            ex_mem_valid_cur &
+                            ex_mem_reg_write_cur &
+                            (ex_mem_rd_waddr_cur != 5'd0) &
+                            ((id_rs1_used_cur & (id_rs1_raddr_cur == ex_mem_rd_waddr_cur)) |
+                             (id_rs2_used_cur & (id_rs2_raddr_cur == ex_mem_rd_waddr_cur)));
+
+    assign hazard_wb_cur = if_id_valid_cur &
+                           wb_write_enable_cur &
+                           (mem_wb_rd_waddr_cur != 5'd0) &
+                           ((id_rs1_used_cur & (id_rs1_raddr_cur == mem_wb_rd_waddr_cur)) |
+                            (id_rs2_used_cur & (id_rs2_raddr_cur == mem_wb_rd_waddr_cur)));
+
+    assign hazard_stall_cur = hazard_ex_cur | hazard_mem_cur | hazard_wb_cur;
+
+    assign id_ex_valid_next        = if_id_valid_cur;
+    assign id_ex_pc_next           = if_id_pc_cur;
+    assign id_ex_pc_plus4_next     = if_id_pc_plus4_cur;
+    assign id_ex_inst_next         = if_id_inst_cur;
+    assign id_ex_rs1_raddr_next    = id_rs1_raddr_cur;
+    assign id_ex_rs2_raddr_next    = id_rs2_raddr_cur;
+    assign id_ex_rd_waddr_next     = id_rd_waddr_cur;
+    assign id_ex_rs1_rdata_next    = id_rs1_rdata_cur;
+    assign id_ex_rs2_rdata_next    = id_rs2_rdata_cur;
+    assign id_ex_offset_next       = id_offset_cur;
+    assign id_ex_opcode_next       = if_id_inst_cur[6:0];
+    assign id_ex_func3_next        = if_id_inst_cur[14:12];
+    assign id_ex_func7_next        = if_id_inst_cur[31:25];
+    assign id_ex_lui_next          = id_lui_cur;
+    assign id_ex_pc_src_next       = id_pc_src_cur;
+    assign id_ex_alu_op_next       = id_alu_op_cur;
+    assign id_ex_mem_write_next    = id_mem_write_cur;
+    assign id_ex_mem_read_next     = id_mem_read_cur;
+    assign id_ex_mem_to_reg_next   = id_mem_to_reg_cur;
+    assign id_ex_alu_src1_next     = id_alu_src1_cur;
+    assign id_ex_alu_src2_next     = id_alu_src2_cur;
+    assign id_ex_reg_write_next    = id_reg_write_cur;
+    assign id_ex_jump_next         = id_jump_cur;
+    assign id_ex_branch_next       = id_branch_cur;
+    assign id_ex_illegal_inst_next = id_illegal_inst_cur;
+    assign id_ex_ebreak_next       = id_ebreak_cur;
+
+    // -------------------------------------------------------------------------
+    // EX stage
+    // -------------------------------------------------------------------------
+    assign ex_operand1_cur = id_ex_alu_src1_cur ? id_ex_pc_cur     : id_ex_rs1_rdata_cur;
+    assign ex_operand2_cur = id_ex_alu_src2_cur ? id_ex_offset_cur : id_ex_rs2_rdata_cur;
 
     execute u_execute (
-        .AluOp     (AluOp),
-        .Func3     (Func3),
-        .Func7     (Func7),
-        .opcode    (opcode),
-        .Operand1  (Operand1),
-        .Operand2  (Operand2),
-        .AluResult (AluResult),
-        .ALUeq     (ALUeq),
-        .ALUslt    (ALUslt)
+        .AluOp      (id_ex_alu_op_cur),
+        .Func3      (id_ex_func3_cur),
+        .Func7      (id_ex_func7_cur),
+        .opcode     (id_ex_opcode_cur),
+        .Operand1   (ex_operand1_cur),
+        .Operand2   (ex_operand2_cur),
+        .AluResult  (ex_alu_result_cur),
+        .ALUeq      (ex_alu_eq_cur),
+        .ALUslt     (ex_alu_slt_cur)
     );
 
-    // =========================================================================
-    // 4) MEMORY
-    // =========================================================================
-    // 
-    // NOTE:
-    //   - o_dmem_addr must be word-aligned
-    //   - mask (I don't get it, Like; figure that out and teach me)
-    //   - Exclusive ren and wen
-    //
-    // Inputs (from earlier stages):
-    //   EffAddr       [31:0]   (already assigned with AluResult)
-    //   StoreData     [31:0]   (o_retire_rs2_rdata)
-    //   Func3         [2:0]    (Func3)
-    //   MemRead, MemWrite
-    //
-    // Outputs (to top-level dmem port):
-    //   o_dmem_addr   [31:0]   aligned
-    //   o_dmem_mask   [3:0]
-    //   o_dmem_wdata  [31:0]   lane-shifted
-    //   o_dmem_ren, o_dmem_wen
-    //   MisalignTrap
-    //
-    // Output (to WB):
-    //   LoadData      [31:0]   final value for lb/lh/lw etc.
+    assign ex_branch_target_cur   = id_ex_pc_cur + id_ex_offset_cur;
+    assign ex_jump_target_raw_cur = id_ex_pc_src_cur ? (id_ex_rs1_rdata_cur + id_ex_offset_cur)
+                                                      : (id_ex_pc_cur + id_ex_offset_cur);
+    assign ex_jump_target_cur     = id_ex_pc_src_cur ? {ex_jump_target_raw_cur[31:1], 1'b0}
+                                                     : ex_jump_target_raw_cur;
+    assign ex_control_target_cur  = id_ex_jump_cur ? ex_jump_target_cur : ex_branch_target_cur;
+
+    assign ex_branch_taken_cur =
+        id_ex_valid_cur & id_ex_branch_cur &
+        ((id_ex_func3_cur == 3'b000) ?  ex_alu_eq_cur  : // beq
+         (id_ex_func3_cur == 3'b001) ? ~ex_alu_eq_cur  : // bne
+         (id_ex_func3_cur == 3'b100) ?  ex_alu_slt_cur : // blt
+         (id_ex_func3_cur == 3'b101) ? ~ex_alu_slt_cur : // bge
+         (id_ex_func3_cur == 3'b110) ?  ex_alu_slt_cur : // bltu
+         (id_ex_func3_cur == 3'b111) ? ~ex_alu_slt_cur : // bgeu
+                                        1'b0);
+    assign ex_jump_taken_cur      = id_ex_valid_cur & id_ex_jump_cur;
+    assign ex_control_taken_cur   = ex_branch_taken_cur | ex_jump_taken_cur;
+    assign ex_pc_misalign_trap_cur= ex_control_taken_cur & (|ex_control_target_cur[1:0]);
+    assign ex_redirect_cur        = ex_control_taken_cur & ~ex_pc_misalign_trap_cur;
+    assign ex_next_pc_cur         = ex_redirect_cur ? ex_control_target_cur : id_ex_pc_plus4_cur;
+
+    assign ex_mem_valid_next        = id_ex_valid_cur;
+    assign ex_mem_pc_next           = id_ex_pc_cur;
+    assign ex_mem_pc_plus4_next     = id_ex_pc_plus4_cur;
+    assign ex_mem_next_pc_next      = ex_next_pc_cur;
+    assign ex_mem_inst_next         = id_ex_inst_cur;
+    assign ex_mem_rs1_raddr_next    = id_ex_rs1_raddr_cur;
+    assign ex_mem_rs2_raddr_next    = id_ex_rs2_raddr_cur;
+    assign ex_mem_rd_waddr_next     = id_ex_rd_waddr_cur;
+    assign ex_mem_rs1_rdata_next    = id_ex_rs1_rdata_cur;
+    assign ex_mem_rs2_rdata_next    = id_ex_rs2_rdata_cur;
+    assign ex_mem_offset_next       = id_ex_offset_cur;
+    assign ex_mem_alu_result_next   = ex_alu_result_cur;
+    assign ex_mem_store_data_next   = id_ex_rs2_rdata_cur;
+    assign ex_mem_func3_next        = id_ex_func3_cur;
+    assign ex_mem_mem_write_next    = id_ex_mem_write_cur;
+    assign ex_mem_mem_read_next     = id_ex_mem_read_cur;
+    assign ex_mem_mem_to_reg_next   = id_ex_mem_to_reg_cur;
+    assign ex_mem_lui_next          = id_ex_lui_cur;
+    assign ex_mem_jump_next         = id_ex_jump_cur;
+    assign ex_mem_reg_write_next    = id_ex_reg_write_cur;
+    assign ex_mem_illegal_inst_next = id_ex_illegal_inst_cur;
+    assign ex_mem_pc_misalign_trap_next = ex_pc_misalign_trap_cur;
+    assign ex_mem_ebreak_next       = id_ex_ebreak_cur;
+
+    // -------------------------------------------------------------------------
+    // MEM stage
+    // -------------------------------------------------------------------------
+    assign mem_read_en_cur  = ex_mem_valid_cur & ex_mem_mem_read_cur;
+    assign mem_write_en_cur = ex_mem_valid_cur & ex_mem_mem_write_cur;
 
     memory u_memory (
-        .EffAddr        (EffAddr),
-        .StoreData      (o_retire_rs2_rdata),
-        .Func3          (Func3),
-        .MemRead        (MemRead),
-        .MemWrite       (MemWrite),
-        .i_dmem_rdata   (i_dmem_rdata),
-
-        .o_dmem_addr    (o_dmem_addr),
-        .o_dmem_mask    (o_dmem_mask),
-        .o_dmem_wdata   (o_dmem_wdata),
-        .o_dmem_ren     (o_dmem_ren),
-        .o_dmem_wen     (o_dmem_wen),
-
-        .LoadData       (LoadData),
-        .MisalignTrap   (MisalignTrap)
+        .EffAddr         (ex_mem_alu_result_cur),
+        .StoreData       (ex_mem_store_data_cur),
+        .Func3           (ex_mem_func3_cur),
+        .MemRead         (mem_read_en_cur),
+        .MemWrite        (mem_write_en_cur),
+        .i_dmem_rdata    (i_dmem_rdata),
+        .o_dmem_addr     (mem_dmem_addr_cur),
+        .o_dmem_mask     (mem_dmem_mask_cur),
+        .o_dmem_wdata    (mem_dmem_wdata_cur),
+        .o_dmem_ren      (mem_dmem_ren_cur),
+        .o_dmem_wen      (mem_dmem_wen_cur),
+        .LoadData        (mem_load_data_cur),
+        .MisalignTrap    (mem_misalign_trap_cur)
     );
 
+    assign o_dmem_addr  = mem_dmem_addr_cur;
+    assign o_dmem_mask  = mem_dmem_mask_cur;
+    assign o_dmem_wdata = mem_dmem_wdata_cur;
+    assign o_dmem_ren   = mem_dmem_ren_cur;
+    assign o_dmem_wen   = mem_dmem_wen_cur;
 
-    // =========================================================================
-    // 5) WRITEBACK
-    // =========================================================================
-    //
-    // Inputs:
-    //   AluResult  [31:0]
-    //   LoadData   [31:0]
-    //   pc_plus4   [31:0]
-    //   Offset     [31:0]   (for LUI, and for AUIPC if you implement that style)
-    //   CONTROLs: MemToReg, lui, Jump
-    //
-    // Output:
-    //   WriteData  [31:0]
+    assign mem_wb_valid_next          = ex_mem_valid_cur;
+    assign mem_wb_pc_next             = ex_mem_pc_cur;
+    assign mem_wb_pc_plus4_next       = ex_mem_pc_plus4_cur;
+    assign mem_wb_next_pc_next        = ex_mem_next_pc_cur;
+    assign mem_wb_inst_next           = ex_mem_inst_cur;
+    assign mem_wb_rs1_raddr_next      = ex_mem_rs1_raddr_cur;
+    assign mem_wb_rs2_raddr_next      = ex_mem_rs2_raddr_cur;
+    assign mem_wb_rd_waddr_next       = ex_mem_rd_waddr_cur;
+    assign mem_wb_rs1_rdata_next      = ex_mem_rs1_rdata_cur;
+    assign mem_wb_rs2_rdata_next      = ex_mem_rs2_rdata_cur;
+    assign mem_wb_offset_next         = ex_mem_offset_cur;
+    assign mem_wb_alu_result_next     = ex_mem_alu_result_cur;
+    assign mem_wb_load_data_next      = mem_load_data_cur;
+    assign mem_wb_dmem_addr_next      = mem_dmem_addr_cur;
+    assign mem_wb_dmem_ren_next       = mem_dmem_ren_cur;
+    assign mem_wb_dmem_wen_next       = mem_dmem_wen_cur;
+    assign mem_wb_dmem_mask_next      = mem_dmem_mask_cur;
+    assign mem_wb_dmem_wdata_next     = mem_dmem_wdata_cur;
+    assign mem_wb_dmem_rdata_next     = i_dmem_rdata;
+    assign mem_wb_mem_to_reg_next     = ex_mem_mem_to_reg_cur;
+    assign mem_wb_lui_next            = ex_mem_lui_cur;
+    assign mem_wb_jump_next           = ex_mem_jump_cur;
+    assign mem_wb_reg_write_next      = ex_mem_reg_write_cur;
+    assign mem_wb_illegal_inst_next   = ex_mem_illegal_inst_cur;
+    assign mem_wb_pc_misalign_trap_next = ex_mem_pc_misalign_trap_cur;
+    assign mem_wb_misalign_trap_next  = mem_misalign_trap_cur;
+    assign mem_wb_ebreak_next         = ex_mem_ebreak_cur;
 
+    // -------------------------------------------------------------------------
+    // WB stage
+    // -------------------------------------------------------------------------
     writeback u_writeback (
-        .AluResult (AluResult),
-        .LoadData  (LoadData),
-        .pc_plus4  (pc_plus4),
-        .Offset    (Offset),
-        .MemToReg  (MemToReg),
-        .lui       (lui),
-        .Jump      (Jump),
-        .WriteData (WriteData)
-    );    
+        .AluResult  (mem_wb_alu_result_cur),
+        .LoadData   (mem_wb_load_data_cur),
+        .pc_plus4   (mem_wb_pc_plus4_cur),
+        .Offset     (mem_wb_offset_cur),
+        .MemToReg   (mem_wb_mem_to_reg_cur),
+        .lui        (mem_wb_lui_cur),
+        .Jump       (mem_wb_jump_cur),
+        .WriteData  (wb_write_data_cur)
+    );
 
-    assign o_retire_rd_wdata = WriteData;
+    assign wb_trap_cur         = mem_wb_illegal_inst_cur |
+                                 mem_wb_pc_misalign_trap_cur |
+                                 mem_wb_misalign_trap_cur;
+    assign wb_write_enable_cur = mem_wb_valid_cur & mem_wb_reg_write_cur & ~wb_trap_cur;
+    assign retire_halt_cur     = mem_wb_valid_cur & mem_wb_ebreak_cur;
+
+    // -------------------------------------------------------------------------
+    // Retire outputs
+    // -------------------------------------------------------------------------
+    assign o_retire_valid     = mem_wb_valid_cur;
+    assign o_retire_inst      = mem_wb_inst_cur;
+    assign o_retire_trap      = mem_wb_valid_cur & wb_trap_cur;
+    assign o_retire_halt      = retire_halt_cur;
+    assign o_retire_rs1_raddr = mem_wb_rs1_raddr_cur;
+    assign o_retire_rs2_raddr = mem_wb_rs2_raddr_cur;
+    assign o_retire_rs1_rdata = mem_wb_rs1_rdata_cur;
+    assign o_retire_rs2_rdata = mem_wb_rs2_rdata_cur;
+    assign o_retire_rd_waddr  = wb_write_enable_cur ? mem_wb_rd_waddr_cur : 5'd0;
+    assign o_retire_rd_wdata  = wb_write_data_cur;
+    assign o_retire_dmem_addr = mem_wb_dmem_addr_cur;
+    assign o_retire_dmem_ren  = mem_wb_dmem_ren_cur;
+    assign o_retire_dmem_wen  = mem_wb_dmem_wen_cur;
+    assign o_retire_dmem_mask = mem_wb_dmem_mask_cur;
+    assign o_retire_dmem_wdata= mem_wb_dmem_wdata_cur;
+    assign o_retire_dmem_rdata= mem_wb_dmem_rdata_cur;
+    assign o_retire_pc        = mem_wb_pc_cur;
+    assign o_retire_next_pc   = mem_wb_next_pc_cur;
+
+    // -------------------------------------------------------------------------
+    // Sequential update
+    // -------------------------------------------------------------------------
+    always @(posedge i_clk) begin
+        if (i_rst) begin
+            pc_cur <= RESET_ADDR;
+            halted_cur <= 1'b0;
+
+            if_id_valid_cur <= 1'b0;
+            if_id_pc_cur <= 32'd0;
+            if_id_pc_plus4_cur <= 32'd0;
+            if_id_inst_cur <= 32'd0;
+
+            id_ex_valid_cur <= 1'b0;
+            id_ex_pc_cur <= 32'd0;
+            id_ex_pc_plus4_cur <= 32'd0;
+            id_ex_inst_cur <= 32'd0;
+            id_ex_rs1_raddr_cur <= 5'd0;
+            id_ex_rs2_raddr_cur <= 5'd0;
+            id_ex_rd_waddr_cur <= 5'd0;
+            id_ex_rs1_rdata_cur <= 32'd0;
+            id_ex_rs2_rdata_cur <= 32'd0;
+            id_ex_offset_cur <= 32'd0;
+            id_ex_opcode_cur <= 7'd0;
+            id_ex_func3_cur <= 3'd0;
+            id_ex_func7_cur <= 7'd0;
+            id_ex_lui_cur <= 1'b0;
+            id_ex_pc_src_cur <= 1'b0;
+            id_ex_alu_op_cur <= 3'd0;
+            id_ex_mem_write_cur <= 1'b0;
+            id_ex_mem_read_cur <= 1'b0;
+            id_ex_mem_to_reg_cur <= 1'b0;
+            id_ex_alu_src1_cur <= 1'b0;
+            id_ex_alu_src2_cur <= 1'b0;
+            id_ex_reg_write_cur <= 1'b0;
+            id_ex_jump_cur <= 1'b0;
+            id_ex_branch_cur <= 1'b0;
+            id_ex_illegal_inst_cur <= 1'b0;
+            id_ex_ebreak_cur <= 1'b0;
+
+            ex_mem_valid_cur <= 1'b0;
+            ex_mem_pc_cur <= 32'd0;
+            ex_mem_pc_plus4_cur <= 32'd0;
+            ex_mem_next_pc_cur <= 32'd0;
+            ex_mem_inst_cur <= 32'd0;
+            ex_mem_rs1_raddr_cur <= 5'd0;
+            ex_mem_rs2_raddr_cur <= 5'd0;
+            ex_mem_rd_waddr_cur <= 5'd0;
+            ex_mem_rs1_rdata_cur <= 32'd0;
+            ex_mem_rs2_rdata_cur <= 32'd0;
+            ex_mem_offset_cur <= 32'd0;
+            ex_mem_alu_result_cur <= 32'd0;
+            ex_mem_store_data_cur <= 32'd0;
+            ex_mem_func3_cur <= 3'd0;
+            ex_mem_mem_write_cur <= 1'b0;
+            ex_mem_mem_read_cur <= 1'b0;
+            ex_mem_mem_to_reg_cur <= 1'b0;
+            ex_mem_lui_cur <= 1'b0;
+            ex_mem_jump_cur <= 1'b0;
+            ex_mem_reg_write_cur <= 1'b0;
+            ex_mem_illegal_inst_cur <= 1'b0;
+            ex_mem_pc_misalign_trap_cur <= 1'b0;
+            ex_mem_ebreak_cur <= 1'b0;
+
+            mem_wb_valid_cur <= 1'b0;
+            mem_wb_pc_cur <= 32'd0;
+            mem_wb_pc_plus4_cur <= 32'd0;
+            mem_wb_next_pc_cur <= 32'd0;
+            mem_wb_inst_cur <= 32'd0;
+            mem_wb_rs1_raddr_cur <= 5'd0;
+            mem_wb_rs2_raddr_cur <= 5'd0;
+            mem_wb_rd_waddr_cur <= 5'd0;
+            mem_wb_rs1_rdata_cur <= 32'd0;
+            mem_wb_rs2_rdata_cur <= 32'd0;
+            mem_wb_offset_cur <= 32'd0;
+            mem_wb_alu_result_cur <= 32'd0;
+            mem_wb_load_data_cur <= 32'd0;
+            mem_wb_dmem_addr_cur <= 32'd0;
+            mem_wb_dmem_ren_cur <= 1'b0;
+            mem_wb_dmem_wen_cur <= 1'b0;
+            mem_wb_dmem_mask_cur <= 4'd0;
+            mem_wb_dmem_wdata_cur <= 32'd0;
+            mem_wb_dmem_rdata_cur <= 32'd0;
+            mem_wb_mem_to_reg_cur <= 1'b0;
+            mem_wb_lui_cur <= 1'b0;
+            mem_wb_jump_cur <= 1'b0;
+            mem_wb_reg_write_cur <= 1'b0;
+            mem_wb_illegal_inst_cur <= 1'b0;
+            mem_wb_pc_misalign_trap_cur <= 1'b0;
+            mem_wb_misalign_trap_cur <= 1'b0;
+            mem_wb_ebreak_cur <= 1'b0;
+        end else if (retire_halt_cur) begin
+            halted_cur <= 1'b1;
+            if_id_valid_cur <= 1'b0;
+            id_ex_valid_cur <= 1'b0;
+            ex_mem_valid_cur <= 1'b0;
+            mem_wb_valid_cur <= 1'b0;
+        end else if (~halted_cur) begin
+            if (ex_redirect_cur) begin
+                // Taken branch/jump redirects fetch and squashes younger instructions.
+                pc_cur <= pc_next;
+
+                if_id_valid_cur <= 1'b0;
+                if_id_pc_cur <= 32'd0;
+                if_id_pc_plus4_cur <= 32'd0;
+                if_id_inst_cur <= 32'd0;
+
+                id_ex_valid_cur <= 1'b0;
+                id_ex_pc_cur <= 32'd0;
+                id_ex_pc_plus4_cur <= 32'd0;
+                id_ex_inst_cur <= 32'd0;
+                id_ex_rs1_raddr_cur <= 5'd0;
+                id_ex_rs2_raddr_cur <= 5'd0;
+                id_ex_rd_waddr_cur <= 5'd0;
+                id_ex_rs1_rdata_cur <= 32'd0;
+                id_ex_rs2_rdata_cur <= 32'd0;
+                id_ex_offset_cur <= 32'd0;
+                id_ex_opcode_cur <= 7'd0;
+                id_ex_func3_cur <= 3'd0;
+                id_ex_func7_cur <= 7'd0;
+                id_ex_lui_cur <= 1'b0;
+                id_ex_pc_src_cur <= 1'b0;
+                id_ex_alu_op_cur <= 3'd0;
+                id_ex_mem_write_cur <= 1'b0;
+                id_ex_mem_read_cur <= 1'b0;
+                id_ex_mem_to_reg_cur <= 1'b0;
+                id_ex_alu_src1_cur <= 1'b0;
+                id_ex_alu_src2_cur <= 1'b0;
+                id_ex_reg_write_cur <= 1'b0;
+                id_ex_jump_cur <= 1'b0;
+                id_ex_branch_cur <= 1'b0;
+                id_ex_illegal_inst_cur <= 1'b0;
+                id_ex_ebreak_cur <= 1'b0;
+            end else if (hazard_stall_cur) begin
+                // Stall fetch/decode and inject bubble into ID/EX.
+                pc_cur <= pc_cur;
+                if_id_valid_cur <= if_id_valid_cur;
+                if_id_pc_cur <= if_id_pc_cur;
+                if_id_pc_plus4_cur <= if_id_pc_plus4_cur;
+                if_id_inst_cur <= if_id_inst_cur;
+
+                id_ex_valid_cur <= 1'b0;
+                id_ex_pc_cur <= 32'd0;
+                id_ex_pc_plus4_cur <= 32'd0;
+                id_ex_inst_cur <= 32'd0;
+                id_ex_rs1_raddr_cur <= 5'd0;
+                id_ex_rs2_raddr_cur <= 5'd0;
+                id_ex_rd_waddr_cur <= 5'd0;
+                id_ex_rs1_rdata_cur <= 32'd0;
+                id_ex_rs2_rdata_cur <= 32'd0;
+                id_ex_offset_cur <= 32'd0;
+                id_ex_opcode_cur <= 7'd0;
+                id_ex_func3_cur <= 3'd0;
+                id_ex_func7_cur <= 7'd0;
+                id_ex_lui_cur <= 1'b0;
+                id_ex_pc_src_cur <= 1'b0;
+                id_ex_alu_op_cur <= 3'd0;
+                id_ex_mem_write_cur <= 1'b0;
+                id_ex_mem_read_cur <= 1'b0;
+                id_ex_mem_to_reg_cur <= 1'b0;
+                id_ex_alu_src1_cur <= 1'b0;
+                id_ex_alu_src2_cur <= 1'b0;
+                id_ex_reg_write_cur <= 1'b0;
+                id_ex_jump_cur <= 1'b0;
+                id_ex_branch_cur <= 1'b0;
+                id_ex_illegal_inst_cur <= 1'b0;
+                id_ex_ebreak_cur <= 1'b0;
+            end else begin
+                pc_cur <= pc_next;
+
+                if_id_valid_cur <= if_id_valid_next;
+                if_id_pc_cur <= if_id_pc_next;
+                if_id_pc_plus4_cur <= if_id_pc_plus4_next;
+                if_id_inst_cur <= if_id_inst_next;
+
+                id_ex_valid_cur <= id_ex_valid_next;
+                id_ex_pc_cur <= id_ex_pc_next;
+                id_ex_pc_plus4_cur <= id_ex_pc_plus4_next;
+                id_ex_inst_cur <= id_ex_inst_next;
+                id_ex_rs1_raddr_cur <= id_ex_rs1_raddr_next;
+                id_ex_rs2_raddr_cur <= id_ex_rs2_raddr_next;
+                id_ex_rd_waddr_cur <= id_ex_rd_waddr_next;
+                id_ex_rs1_rdata_cur <= id_ex_rs1_rdata_next;
+                id_ex_rs2_rdata_cur <= id_ex_rs2_rdata_next;
+                id_ex_offset_cur <= id_ex_offset_next;
+                id_ex_opcode_cur <= id_ex_opcode_next;
+                id_ex_func3_cur <= id_ex_func3_next;
+                id_ex_func7_cur <= id_ex_func7_next;
+                id_ex_lui_cur <= id_ex_lui_next;
+                id_ex_pc_src_cur <= id_ex_pc_src_next;
+                id_ex_alu_op_cur <= id_ex_alu_op_next;
+                id_ex_mem_write_cur <= id_ex_mem_write_next;
+                id_ex_mem_read_cur <= id_ex_mem_read_next;
+                id_ex_mem_to_reg_cur <= id_ex_mem_to_reg_next;
+                id_ex_alu_src1_cur <= id_ex_alu_src1_next;
+                id_ex_alu_src2_cur <= id_ex_alu_src2_next;
+                id_ex_reg_write_cur <= id_ex_reg_write_next;
+                id_ex_jump_cur <= id_ex_jump_next;
+                id_ex_branch_cur <= id_ex_branch_next;
+                id_ex_illegal_inst_cur <= id_ex_illegal_inst_next;
+                id_ex_ebreak_cur <= id_ex_ebreak_next;
+            end
+
+            ex_mem_valid_cur <= ex_mem_valid_next;
+            ex_mem_pc_cur <= ex_mem_pc_next;
+            ex_mem_pc_plus4_cur <= ex_mem_pc_plus4_next;
+            ex_mem_next_pc_cur <= ex_mem_next_pc_next;
+            ex_mem_inst_cur <= ex_mem_inst_next;
+            ex_mem_rs1_raddr_cur <= ex_mem_rs1_raddr_next;
+            ex_mem_rs2_raddr_cur <= ex_mem_rs2_raddr_next;
+            ex_mem_rd_waddr_cur <= ex_mem_rd_waddr_next;
+            ex_mem_rs1_rdata_cur <= ex_mem_rs1_rdata_next;
+            ex_mem_rs2_rdata_cur <= ex_mem_rs2_rdata_next;
+            ex_mem_offset_cur <= ex_mem_offset_next;
+            ex_mem_alu_result_cur <= ex_mem_alu_result_next;
+            ex_mem_store_data_cur <= ex_mem_store_data_next;
+            ex_mem_func3_cur <= ex_mem_func3_next;
+            ex_mem_mem_write_cur <= ex_mem_mem_write_next;
+            ex_mem_mem_read_cur <= ex_mem_mem_read_next;
+            ex_mem_mem_to_reg_cur <= ex_mem_mem_to_reg_next;
+            ex_mem_lui_cur <= ex_mem_lui_next;
+            ex_mem_jump_cur <= ex_mem_jump_next;
+            ex_mem_reg_write_cur <= ex_mem_reg_write_next;
+            ex_mem_illegal_inst_cur <= ex_mem_illegal_inst_next;
+            ex_mem_pc_misalign_trap_cur <= ex_mem_pc_misalign_trap_next;
+            ex_mem_ebreak_cur <= ex_mem_ebreak_next;
+
+            mem_wb_valid_cur <= mem_wb_valid_next;
+            mem_wb_pc_cur <= mem_wb_pc_next;
+            mem_wb_pc_plus4_cur <= mem_wb_pc_plus4_next;
+            mem_wb_next_pc_cur <= mem_wb_next_pc_next;
+            mem_wb_inst_cur <= mem_wb_inst_next;
+            mem_wb_rs1_raddr_cur <= mem_wb_rs1_raddr_next;
+            mem_wb_rs2_raddr_cur <= mem_wb_rs2_raddr_next;
+            mem_wb_rd_waddr_cur <= mem_wb_rd_waddr_next;
+            mem_wb_rs1_rdata_cur <= mem_wb_rs1_rdata_next;
+            mem_wb_rs2_rdata_cur <= mem_wb_rs2_rdata_next;
+            mem_wb_offset_cur <= mem_wb_offset_next;
+            mem_wb_alu_result_cur <= mem_wb_alu_result_next;
+            mem_wb_load_data_cur <= mem_wb_load_data_next;
+            mem_wb_dmem_addr_cur <= mem_wb_dmem_addr_next;
+            mem_wb_dmem_ren_cur <= mem_wb_dmem_ren_next;
+            mem_wb_dmem_wen_cur <= mem_wb_dmem_wen_next;
+            mem_wb_dmem_mask_cur <= mem_wb_dmem_mask_next;
+            mem_wb_dmem_wdata_cur <= mem_wb_dmem_wdata_next;
+            mem_wb_dmem_rdata_cur <= mem_wb_dmem_rdata_next;
+            mem_wb_mem_to_reg_cur <= mem_wb_mem_to_reg_next;
+            mem_wb_lui_cur <= mem_wb_lui_next;
+            mem_wb_jump_cur <= mem_wb_jump_next;
+            mem_wb_reg_write_cur <= mem_wb_reg_write_next;
+            mem_wb_illegal_inst_cur <= mem_wb_illegal_inst_next;
+            mem_wb_pc_misalign_trap_cur <= mem_wb_pc_misalign_trap_next;
+            mem_wb_misalign_trap_cur <= mem_wb_misalign_trap_next;
+            mem_wb_ebreak_cur <= mem_wb_ebreak_next;
+        end
+    end
 
 endmodule
 
