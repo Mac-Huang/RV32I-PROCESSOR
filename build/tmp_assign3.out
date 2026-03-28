@@ -1,0 +1,49 @@
+#! /c/Source/iverilog-install/bin/vvp
+:ivl_version "12.0 (devel)" "(s20150603-1539-g2693dd32b)";
+:ivl_delay_selection "TYPICAL";
+:vpi_time_precision + 0;
+:vpi_module "D:\iverilog\lib\ivl\system.vpi";
+:vpi_module "D:\iverilog\lib\ivl\vhdl_sys.vpi";
+:vpi_module "D:\iverilog\lib\ivl\vhdl_textio.vpi";
+:vpi_module "D:\iverilog\lib\ivl\v2005_math.vpi";
+:vpi_module "D:\iverilog\lib\ivl\va_math.vpi";
+S_000001700ab15db0 .scope module, "tb" "tb" 2 2;
+ .timescale 0 0;
+v000001700ab12a40_0 .var "wdata", 31 0;
+v000001700ab12ae0_0 .var "wen", 0 0;
+v000001700ab12b80_0 .net "y", 31 0, L_000001700ab12c20;  1 drivers
+S_000001700ab15f40 .scope module, "u" "m" 2 2, 2 1 0, S_000001700ab15db0;
+ .timescale 0 0;
+    .port_info 0 /INPUT 1 "wen";
+    .port_info 1 /INPUT 32 "wdata";
+    .port_info 2 /OUTPUT 32 "y";
+L_000001700ab5c028 .functor BUFT 1, C4<00000000000000000000000000000000>, C4<0>, C4<0>, C4<0>;
+v000001700aac7260_0 .net/2u *"_ivl_0", 31 0, L_000001700ab5c028;  1 drivers
+v000001700aac9290_0 .net "wdata", 31 0, v000001700ab12a40_0;  1 drivers
+v000001700ab160d0_0 .net "wen", 0 0, v000001700ab12ae0_0;  1 drivers
+v000001700ab16170_0 .net "y", 31 0, L_000001700ab12c20;  alias, 1 drivers
+L_000001700ab12c20 .functor MUXZ 32, L_000001700ab5c028, v000001700ab12a40_0, v000001700ab12ae0_0, C4<>;
+    .scope S_000001700ab15db0;
+T_0 ;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v000001700ab12ae0_0, 0, 1;
+    %pushi/vec4 0, 0, 32;
+    %store/vec4 v000001700ab12a40_0, 0, 32;
+    %delay 9, 0;
+    %pushi/vec4 2779096485, 0, 32;
+    %store/vec4 v000001700ab12a40_0, 0, 32;
+    %delay 1, 0;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v000001700ab12ae0_0, 0, 1;
+    %vpi_call 2 2 "$display", "imm y=%h", v000001700ab12b80_0 {0 0 0};
+    %delay 0, 0;
+    %vpi_call 2 2 "$display", "#0 y=%h", v000001700ab12b80_0 {0 0 0};
+    %delay 1, 0;
+    %vpi_call 2 2 "$finish" {0 0 0};
+    %end;
+    .thread T_0;
+# The file index is used to find the file name in the following table.
+:file_names 3;
+    "N/A";
+    "<interactive>";
+    "build/tmp_assign3.v";

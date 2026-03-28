@@ -244,6 +244,9 @@ module hart #(
     // -------------------------------------------------------------------------
     wire [31:0] ex_operand1_cur;
     wire [31:0] ex_operand2_cur;
+    wire [31:0] ex_rs1_value_cur;
+    wire [31:0] ex_rs2_value_cur;
+    wire [31:0] ex_store_data_cur;
     wire [31:0] ex_alu_result_cur;
     wire        ex_alu_eq_cur;
     wire        ex_alu_slt_cur;
@@ -257,6 +260,16 @@ module hart #(
     wire        ex_pc_misalign_trap_cur;
     wire        ex_redirect_cur;
     wire [31:0] ex_next_pc_cur;
+    wire [31:0] ex_mem_forward_data_cur;
+    wire [31:0] mem_wb_forward_data_cur;
+    wire        ex_ex_match_rs1_cur;
+    wire        ex_ex_match_rs2_cur;
+    wire        mem_ex_match_rs1_cur;
+    wire        mem_ex_match_rs2_cur;
+    wire [1:0]  ex_forward_a_sel_cur;
+    wire [1:0]  ex_forward_b_sel_cur;
+    wire [1:0]  ex_operand1_sel_cur;
+    wire [1:0]  ex_operand2_sel_cur;
 
     reg         ex_mem_valid_cur;
     reg  [31:0] ex_mem_pc_cur;
@@ -317,7 +330,9 @@ module hart #(
     wire        mem_dmem_ren_cur;
     wire        mem_dmem_wen_cur;
     wire [31:0] mem_load_data_cur;
+    wire [31:0] mem_store_data_cur;
     wire        mem_misalign_trap_cur;
+    wire        mem_store_data_fwd_cur;
 
     reg         mem_wb_valid_cur;
     reg  [31:0] mem_wb_pc_cur;
@@ -385,6 +400,7 @@ module hart #(
     wire [6:0]  id_opcode_cur;
     wire        id_rs1_used_cur;
     wire        id_rs2_used_cur;
+    wire        id_rs2_ex_used_cur;
     wire        hazard_ex_cur;
     wire        hazard_mem_cur;
     wire        hazard_wb_cur;
@@ -408,7 +424,7 @@ module hart #(
     // -------------------------------------------------------------------------
     // ID stage
     // -------------------------------------------------------------------------
-    decode #(.BYPASS_EN(0)) u_decode (
+    decode #(.BYPASS_EN(1)) u_decode (
         .i_clk              (i_clk),
         .i_rst              (i_rst),
         .Inst               (if_id_inst_cur),
@@ -449,25 +465,19 @@ module hart #(
                              (id_opcode_cur == 7'b0100011) |  // store
                              (id_opcode_cur == 7'b1100011);   // branch
 
+    assign id_rs2_ex_used_cur = (id_opcode_cur == 7'b0110011) |  // R-type
+                                (id_opcode_cur == 7'b1100011);   // branch
+
     assign hazard_ex_cur = if_id_valid_cur &
                            id_ex_valid_cur &
-                           id_ex_reg_write_cur &
+                           id_ex_mem_read_cur &
                            (id_ex_rd_waddr_cur != 5'd0) &
                            ((id_rs1_used_cur & (id_rs1_raddr_cur == id_ex_rd_waddr_cur)) |
-                            (id_rs2_used_cur & (id_rs2_raddr_cur == id_ex_rd_waddr_cur)));
+                            (id_rs2_ex_used_cur & (id_rs2_raddr_cur == id_ex_rd_waddr_cur)));
 
-    assign hazard_mem_cur = if_id_valid_cur &
-                            ex_mem_valid_cur &
-                            ex_mem_reg_write_cur &
-                            (ex_mem_rd_waddr_cur != 5'd0) &
-                            ((id_rs1_used_cur & (id_rs1_raddr_cur == ex_mem_rd_waddr_cur)) |
-                             (id_rs2_used_cur & (id_rs2_raddr_cur == ex_mem_rd_waddr_cur)));
+    assign hazard_mem_cur = 1'b0;
 
-    assign hazard_wb_cur = if_id_valid_cur &
-                           wb_write_enable_cur &
-                           (mem_wb_rd_waddr_cur != 5'd0) &
-                           ((id_rs1_used_cur & (id_rs1_raddr_cur == mem_wb_rd_waddr_cur)) |
-                            (id_rs2_used_cur & (id_rs2_raddr_cur == mem_wb_rd_waddr_cur)));
+    assign hazard_wb_cur = 1'b0;
 
     assign hazard_stall_cur = hazard_ex_cur | hazard_mem_cur | hazard_wb_cur;
 
@@ -501,8 +511,59 @@ module hart #(
     // -------------------------------------------------------------------------
     // EX stage
     // -------------------------------------------------------------------------
-    assign ex_operand1_cur = id_ex_alu_src1_cur ? id_ex_pc_cur     : id_ex_rs1_rdata_cur;
-    assign ex_operand2_cur = id_ex_alu_src2_cur ? id_ex_offset_cur : id_ex_rs2_rdata_cur;
+    assign ex_mem_forward_data_cur = ex_mem_jump_cur ? ex_mem_pc_plus4_cur :
+                                     ex_mem_lui_cur  ? ex_mem_offset_cur :
+                                                       ex_mem_alu_result_cur;
+    assign mem_wb_forward_data_cur = wb_write_data_cur;
+
+    assign ex_ex_match_rs1_cur = id_ex_valid_cur &
+                                 ex_mem_valid_cur &
+                                 ex_mem_reg_write_cur &
+                                 ~ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_ex_rs1_raddr_cur);
+    assign ex_ex_match_rs2_cur = id_ex_valid_cur &
+                                 ex_mem_valid_cur &
+                                 ex_mem_reg_write_cur &
+                                 ~ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_ex_rs2_raddr_cur);
+
+    assign mem_ex_match_rs1_cur = id_ex_valid_cur &
+                                  mem_wb_valid_cur &
+                                  mem_wb_reg_write_cur &
+                                  (mem_wb_rd_waddr_cur != 5'd0) &
+                                  ~ex_ex_match_rs1_cur &
+                                  (mem_wb_rd_waddr_cur == id_ex_rs1_raddr_cur);
+    assign mem_ex_match_rs2_cur = id_ex_valid_cur &
+                                  mem_wb_valid_cur &
+                                  mem_wb_reg_write_cur &
+                                  (mem_wb_rd_waddr_cur != 5'd0) &
+                                  ~ex_ex_match_rs2_cur &
+                                  (mem_wb_rd_waddr_cur == id_ex_rs2_raddr_cur);
+
+    assign ex_forward_a_sel_cur = ex_ex_match_rs1_cur ? 2'b10 :
+                                  mem_ex_match_rs1_cur ? 2'b01 :
+                                                         2'b00;
+    assign ex_forward_b_sel_cur = ex_ex_match_rs2_cur ? 2'b10 :
+                                  mem_ex_match_rs2_cur ? 2'b01 :
+                                                         2'b00;
+
+    assign ex_operand1_sel_cur = id_ex_alu_src1_cur ? 2'b11 : ex_forward_a_sel_cur;
+    assign ex_operand2_sel_cur = id_ex_alu_src2_cur ? 2'b11 : ex_forward_b_sel_cur;
+
+    assign ex_rs1_value_cur = (ex_forward_a_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
+                              (ex_forward_a_sel_cur == 2'b01) ? mem_wb_forward_data_cur :
+                                                                id_ex_rs1_rdata_cur;
+    assign ex_rs2_value_cur = (ex_forward_b_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
+                              (ex_forward_b_sel_cur == 2'b01) ? mem_wb_forward_data_cur :
+                                                                id_ex_rs2_rdata_cur;
+
+    assign ex_operand1_cur = (ex_operand1_sel_cur == 2'b11) ? id_ex_pc_cur
+                                                             : ex_rs1_value_cur;
+    assign ex_operand2_cur = (ex_operand2_sel_cur == 2'b11) ? id_ex_offset_cur
+                                                             : ex_rs2_value_cur;
+    assign ex_store_data_cur = ex_rs2_value_cur;
 
     execute u_execute (
         .AluOp      (id_ex_alu_op_cur),
@@ -517,7 +578,7 @@ module hart #(
     );
 
     assign ex_branch_target_cur   = id_ex_pc_cur + id_ex_offset_cur;
-    assign ex_jump_target_raw_cur = id_ex_pc_src_cur ? (id_ex_rs1_rdata_cur + id_ex_offset_cur)
+    assign ex_jump_target_raw_cur = id_ex_pc_src_cur ? (ex_operand1_cur + id_ex_offset_cur)
                                                       : (id_ex_pc_cur + id_ex_offset_cur);
     assign ex_jump_target_cur     = id_ex_pc_src_cur ? {ex_jump_target_raw_cur[31:1], 1'b0}
                                                      : ex_jump_target_raw_cur;
@@ -546,11 +607,11 @@ module hart #(
     assign ex_mem_rs1_raddr_next    = id_ex_rs1_raddr_cur;
     assign ex_mem_rs2_raddr_next    = id_ex_rs2_raddr_cur;
     assign ex_mem_rd_waddr_next     = id_ex_rd_waddr_cur;
-    assign ex_mem_rs1_rdata_next    = id_ex_rs1_rdata_cur;
-    assign ex_mem_rs2_rdata_next    = id_ex_rs2_rdata_cur;
+    assign ex_mem_rs1_rdata_next    = ex_rs1_value_cur;
+    assign ex_mem_rs2_rdata_next    = ex_rs2_value_cur;
     assign ex_mem_offset_next       = id_ex_offset_cur;
     assign ex_mem_alu_result_next   = ex_alu_result_cur;
-    assign ex_mem_store_data_next   = id_ex_rs2_rdata_cur;
+    assign ex_mem_store_data_next   = ex_store_data_cur;
     assign ex_mem_func3_next        = id_ex_func3_cur;
     assign ex_mem_mem_write_next    = id_ex_mem_write_cur;
     assign ex_mem_mem_read_next     = id_ex_mem_read_cur;
@@ -567,10 +628,18 @@ module hart #(
     // -------------------------------------------------------------------------
     assign mem_read_en_cur  = ex_mem_valid_cur & ex_mem_mem_read_cur;
     assign mem_write_en_cur = ex_mem_valid_cur & ex_mem_mem_write_cur;
+    assign mem_store_data_fwd_cur = mem_wb_valid_cur &
+                                    mem_wb_mem_to_reg_cur &
+                                    ex_mem_valid_cur &
+                                    ex_mem_mem_write_cur &
+                                    (mem_wb_rd_waddr_cur != 5'd0) &
+                                    (mem_wb_rd_waddr_cur == ex_mem_rs2_raddr_cur);
+    assign mem_store_data_cur = mem_store_data_fwd_cur ? mem_wb_load_data_cur
+                                                       : ex_mem_store_data_cur;
 
     memory u_memory (
         .EffAddr         (ex_mem_alu_result_cur),
-        .StoreData       (ex_mem_store_data_cur),
+        .StoreData       (mem_store_data_cur),
         .Func3           (ex_mem_func3_cur),
         .MemRead         (mem_read_en_cur),
         .MemWrite        (mem_write_en_cur),

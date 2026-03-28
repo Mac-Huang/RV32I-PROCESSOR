@@ -1,0 +1,180 @@
+#! /c/Source/iverilog-install/bin/vvp
+:ivl_version "12.0 (devel)" "(s20150603-1539-g2693dd32b)";
+:ivl_delay_selection "TYPICAL";
+:vpi_time_precision - 12;
+:vpi_module "D:\iverilog\lib\ivl\system.vpi";
+:vpi_module "D:\iverilog\lib\ivl\vhdl_sys.vpi";
+:vpi_module "D:\iverilog\lib\ivl\vhdl_textio.vpi";
+:vpi_module "D:\iverilog\lib\ivl\v2005_math.vpi";
+:vpi_module "D:\iverilog\lib\ivl\va_math.vpi";
+S_0000026e6e2cb790 .scope module, "unit_writeback_tb" "unit_writeback_tb" 2 3;
+ .timescale -9 -12;
+v0000026e6e1e5030_0 .var "AluResult", 31 0;
+v0000026e6e1e50d0_0 .var "Jump", 0 0;
+v0000026e6e238aa0_0 .var "LoadData", 31 0;
+v0000026e6e239040_0 .var "MemToReg", 0 0;
+v0000026e6e238c80_0 .var "Offset", 31 0;
+v0000026e6e2390e0_0 .net "WriteData", 31 0, L_0000026e6e239360;  1 drivers
+v0000026e6e238b40_0 .var "lui", 0 0;
+v0000026e6e238960_0 .var "pc_plus4", 31 0;
+S_0000026e6e2cbbf0 .scope task, "check" "check" 2 24, 2 24 0, S_0000026e6e2cb790;
+ .timescale -9 -12;
+v0000026e6e2cbd80_0 .var "exp", 31 0;
+v0000026e6e2cbe20_0 .var "name", 255 0;
+TD_unit_writeback_tb.check ;
+    %delay 1000, 0;
+    %load/vec4 v0000026e6e2390e0_0;
+    %load/vec4 v0000026e6e2cbd80_0;
+    %cmp/ne;
+    %jmp/0xz  T_0.0, 6;
+    %vpi_call 2 30 "$display", "FAIL %s: got=%h exp=%h", v0000026e6e2cbe20_0, v0000026e6e2390e0_0, v0000026e6e2cbd80_0 {0 0 0};
+    %vpi_call 2 31 "$finish" {0 0 0};
+T_0.0 ;
+    %end;
+S_0000026e6e2c64a0 .scope module, "dut" "writeback" 2 13, 3 1 0, S_0000026e6e2cb790;
+ .timescale -9 -12;
+    .port_info 0 /INPUT 32 "AluResult";
+    .port_info 1 /INPUT 32 "LoadData";
+    .port_info 2 /INPUT 32 "pc_plus4";
+    .port_info 3 /INPUT 32 "Offset";
+    .port_info 4 /INPUT 1 "MemToReg";
+    .port_info 5 /INPUT 1 "lui";
+    .port_info 6 /INPUT 1 "Jump";
+    .port_info 7 /OUTPUT 32 "WriteData";
+v0000026e6e2cbec0_0 .net "AluResult", 31 0, v0000026e6e1e5030_0;  1 drivers
+v0000026e6e2c6630_0 .net "Jump", 0 0, v0000026e6e1e50d0_0;  1 drivers
+v0000026e6e2c66d0_0 .net "LoadData", 31 0, v0000026e6e238aa0_0;  1 drivers
+v0000026e6e2c6770_0 .net "MemToReg", 0 0, v0000026e6e239040_0;  1 drivers
+v0000026e6e2c6810_0 .net "Offset", 31 0, v0000026e6e238c80_0;  1 drivers
+v0000026e6e2c68b0_0 .net "WriteData", 31 0, L_0000026e6e239360;  alias, 1 drivers
+v0000026e6e1e4db0_0 .net *"_ivl_0", 31 0, L_0000026e6e2397c0;  1 drivers
+v0000026e6e1e4e50_0 .net *"_ivl_2", 31 0, L_0000026e6e238fa0;  1 drivers
+v0000026e6e1e4ef0_0 .net "lui", 0 0, v0000026e6e238b40_0;  1 drivers
+v0000026e6e1e4f90_0 .net "pc_plus4", 31 0, v0000026e6e238960_0;  1 drivers
+L_0000026e6e2397c0 .functor MUXZ 32, v0000026e6e1e5030_0, v0000026e6e238aa0_0, v0000026e6e239040_0, C4<>;
+L_0000026e6e238fa0 .functor MUXZ 32, L_0000026e6e2397c0, v0000026e6e238c80_0, v0000026e6e238b40_0, C4<>;
+L_0000026e6e239360 .functor MUXZ 32, L_0000026e6e238fa0, v0000026e6e238960_0, v0000026e6e1e50d0_0, C4<>;
+    .scope S_0000026e6e2cb790;
+T_1 ;
+    %pushi/vec4 286331153, 0, 32;
+    %store/vec4 v0000026e6e1e5030_0, 0, 32;
+    %pushi/vec4 572662306, 0, 32;
+    %store/vec4 v0000026e6e238aa0_0, 0, 32;
+    %pushi/vec4 858993459, 0, 32;
+    %store/vec4 v0000026e6e238960_0, 0, 32;
+    %pushi/vec4 1145324612, 0, 32;
+    %store/vec4 v0000026e6e238c80_0, 0, 32;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e1e50d0_0, 0, 1;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e238b40_0, 0, 1;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e239040_0, 0, 1;
+    %pushi/vec4 858993459, 0, 32;
+    %store/vec4 v0000026e6e2cbd80_0, 0, 32;
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 106, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1970106463, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1886546287, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1919513721, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %store/vec4 v0000026e6e2cbe20_0, 0, 256;
+    %fork TD_unit_writeback_tb.check, S_0000026e6e2cbbf0;
+    %join;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e1e50d0_0, 0, 1;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e238b40_0, 0, 1;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e239040_0, 0, 1;
+    %pushi/vec4 1145324612, 0, 32;
+    %store/vec4 v0000026e6e2cbd80_0, 0, 32;
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1819634015, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1886546287, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1919513721, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %store/vec4 v0000026e6e2cbe20_0, 0, 256;
+    %fork TD_unit_writeback_tb.check, S_0000026e6e2cbbf0;
+    %join;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e1e50d0_0, 0, 1;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e238b40_0, 0, 1;
+    %pushi/vec4 1, 0, 1;
+    %store/vec4 v0000026e6e239040_0, 0, 1;
+    %pushi/vec4 572662306, 0, 32;
+    %store/vec4 v0000026e6e2cbd80_0, 0, 32;
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1835363700, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1869768039, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %store/vec4 v0000026e6e2cbe20_0, 0, 256;
+    %fork TD_unit_writeback_tb.check, S_0000026e6e2cbbf0;
+    %join;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e1e50d0_0, 0, 1;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e238b40_0, 0, 1;
+    %pushi/vec4 0, 0, 1;
+    %store/vec4 v0000026e6e239040_0, 0, 1;
+    %pushi/vec4 286331153, 0, 32;
+    %store/vec4 v0000026e6e2cbd80_0, 0, 32;
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 0, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 6384757, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1600415078, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %pushi/vec4 1635085428, 0, 32; draw_string_vec4
+    %concat/vec4; draw_string_vec4
+    %store/vec4 v0000026e6e2cbe20_0, 0, 256;
+    %fork TD_unit_writeback_tb.check, S_0000026e6e2cbbf0;
+    %join;
+    %vpi_call 2 58 "$display", "PASS unit_writeback_tb" {0 0 0};
+    %vpi_call 2 59 "$finish" {0 0 0};
+    %end;
+    .thread T_1;
+# The file index is used to find the file name in the following table.
+:file_names 4;
+    "N/A";
+    "<interactive>";
+    "tests/unit_writeback_tb.v";
+    "rtl/writeback.v";
