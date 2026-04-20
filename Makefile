@@ -5,6 +5,7 @@ IVERILOG_FLAGS ?= -g2001
 BUILD_DIR := build
 
 RTL_SRCS := \
+	rtl/cache.v \
 	rtl/hart.v \
 	rtl/decode.v \
 	rtl/execute.v \
@@ -53,7 +54,7 @@ unit_decode_TOP := unit_decode_tb
 unit_decode_SRCS := tests/unit_decode_tb.v rtl/decode.v lib/rf.v lib/imm.v
 
 unit_hart_TOP := unit_hart_tb
-unit_hart_SRCS := tests/unit_hart_tb.v $(RTL_SRCS) $(LIB_SRCS)
+unit_hart_SRCS := tests/unit_hart_tb.v rtl/tb_memory.v $(RTL_SRCS) $(LIB_SRCS)
 
 .PHONY: all test clean $(addprefix run-,$(TESTS))
 

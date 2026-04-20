@@ -1,4 +1,4 @@
-module memory (
+module dmem_access (
     input  wire [31:0] EffAddr,
     input  wire [31:0] StoreData,
     input  wire [2:0]  Func3,

@@ -5,15 +5,12 @@ module hart_tb #(
     // Synchronous active-high reset.
     reg         clk, rst;
     // Instruction memory interface.
+    wire  [31:0] imem_rdata, dmem_rdata;
     wire [31:0] imem_raddr, dmem_addr;
-    wire        imem_ready, imem_ren, imem_valid;
-    wire [31:0] imem_rdata;
     // Data memory interface.
-    wire        dmem_ready, dmem_ren, dmem_wen, dmem_valid;
+    wire        dmem_ren, dmem_wen;
     wire [31:0] dmem_wdata;
     wire [ 3:0] dmem_mask;
-    wire [31:0] dmem_rdata;
-    wire        dmem_rvalid, dmem_wdone;
 
     // Instruction retire interface.
     wire        valid, trap, halt;
@@ -28,6 +25,44 @@ module hart_tb #(
     wire [ 3:0] retire_dmem_mask;
     wire [31:0] retire_dmem_rdata;
     wire [31:0] retire_dmem_wdata;
+
+    // Instruction memory.
+    wire imem_ready, imem_ren, imem_valid;
+    memory #(
+        .SIZE(1024),
+        .LATENCY(4),
+        .INTERVAL(2)
+    ) imem (
+        .i_clk(clk),
+        .i_rst(rst),
+        .o_ready(imem_ready),
+        .i_addr(imem_raddr),
+        .i_ren(imem_ren),
+        .i_wen(1'b0),
+        .i_mask(4'b1111),
+        .i_wdata(32'hxxxxxxxx),
+        .o_valid(imem_valid),
+        .o_rdata(imem_rdata)
+    );
+
+    // Data memory.
+    wire dmem_ready, dmem_valid;
+    memory #(
+        .SIZE(1024),
+        .LATENCY(4),
+        .INTERVAL(2)
+    ) dmem (
+        .i_clk(clk),
+        .i_rst(rst),
+        .o_ready(dmem_ready),
+        .i_addr(dmem_addr),
+        .i_ren(dmem_ren),
+        .i_wen(dmem_wen),
+        .i_mask(dmem_mask),
+        .i_wdata(dmem_wdata),
+        .o_valid(dmem_valid),
+        .o_rdata(dmem_rdata)
+    );
 
     hart #(
         .RESET_ADDR (32'h0)
@@ -67,50 +102,8 @@ module hart_tb #(
         .o_retire_next_pc   (next_pc)
     );
 
-    // The testbench uses separate instruction and data memory banks.
-    memory #(
-        .SIZE     (1024),
-        .LATENCY  (4),
-        .INTERVAL (2)
-    ) u_imem (
-        .i_clk   (clk),
-        .i_rst   (rst),
-        .o_ready (imem_ready),
-        .i_addr  (imem_raddr),
-        .i_ren   (imem_ren),
-        .i_wen   (1'b0),
-        .i_mask  (4'b1111),
-        .i_wdata (32'd0),
-        .o_valid (imem_valid),
-        .o_addr  (),
-        .o_wdone (),
-        .o_rdata (imem_rdata)
-    );
-
-    memory #(
-        .SIZE     (1024),
-        .LATENCY  (4),
-        .INTERVAL (2)
-    ) u_dmem (
-        .i_clk   (clk),
-        .i_rst   (rst),
-        .o_ready (dmem_ready),
-        .i_addr  (dmem_addr),
-        .i_ren   (dmem_ren),
-        .i_wen   (dmem_wen),
-        .i_mask  (dmem_mask),
-        .i_wdata (dmem_wdata),
-        .o_valid (dmem_rvalid),
-        .o_addr  (),
-        .o_wdone (dmem_wdone),
-        .o_rdata (dmem_rdata)
-    );
-
-    assign dmem_valid = dmem_rvalid;
-
     integer cycles, run;
     integer num_instructions;
-    integer i;
     initial begin
         clk = 1;
         rst = 0;
@@ -123,11 +116,7 @@ module hart_tb #(
 
         // Load the test program into memory at address 0.
         $display("Loading program.");
-        for (i = 0; i < 1024; i = i + 1) begin
-            u_imem.mem[i] = 8'h00;
-            u_dmem.mem[i] = 8'h00;
-        end
-        $readmemh("program.mem", u_imem.mem);
+        $readmemh("program.mem", imem.mem);
 
         // Reset the dut.
         $display("Resetting hart.");
@@ -160,8 +149,25 @@ module hart_tb #(
                 if (rd_waddr != 5'd0)
                     $write(" w[%d]=%08h", rd_waddr, rd_wdata);
                 // Only display memory information for load/store instructions.
-                if (retire_dmem_ren)
-                    $write(" l[%08h,%04b]=%08h", retire_dmem_addr, retire_dmem_mask, retire_dmem_rdata);
+                if (retire_dmem_ren) begin
+                    $write(" l[%08h,%04b]=", retire_dmem_addr, retire_dmem_mask);
+                    if (retire_dmem_mask[3])
+                        $write("%02h", retire_dmem_rdata[31:24]);
+                    else
+                        $write("--");
+                    if (retire_dmem_mask[2])
+                        $write("%02h", retire_dmem_rdata[23:16]);
+                    else
+                        $write("--");
+                    if (retire_dmem_mask[1])
+                        $write("%02h", retire_dmem_rdata[15: 8]);
+                    else
+                        $write("--");
+                    if (retire_dmem_mask[0])
+                        $write("%02h", retire_dmem_rdata[ 7: 0]);
+                    else
+                        $write("--");
+                end
                 if (retire_dmem_wen)
                     $write(" s[%08h,%04b]=%08h", retire_dmem_addr, retire_dmem_mask, retire_dmem_wdata);
                 // Display trap information if a trap occurred.

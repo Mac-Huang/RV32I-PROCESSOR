@@ -3,14 +3,21 @@
 module unit_hart_tb;
     reg         clk;
     reg         rst;
-    reg  [31:0] imem_rdata;
-    reg  [31:0] dmem_rdata;
     wire [31:0] imem_raddr;
+    wire        imem_ren;
+    wire        imem_ready;
+    wire        imem_valid;
+    wire [31:0] imem_rdata;
     wire [31:0] dmem_addr;
+    wire        dmem_ready;
     wire        dmem_ren;
     wire        dmem_wen;
+    wire        dmem_valid;
     wire [31:0] dmem_wdata;
     wire [3:0]  dmem_mask;
+    wire [31:0] dmem_rdata;
+    wire        dmem_rvalid;
+    wire        dmem_wdone;
 
     wire        valid;
     wire        trap;
@@ -28,13 +35,18 @@ module unit_hart_tb;
     hart #(.RESET_ADDR(32'h0)) dut (
         .i_clk        (clk),
         .i_rst        (rst),
+        .i_imem_ready (imem_ready),
         .o_imem_raddr (imem_raddr),
+        .o_imem_ren   (imem_ren),
+        .i_imem_valid (imem_valid),
         .i_imem_rdata (imem_rdata),
+        .i_dmem_ready (dmem_ready),
         .o_dmem_addr  (dmem_addr),
         .o_dmem_ren   (dmem_ren),
         .o_dmem_wen   (dmem_wen),
         .o_dmem_wdata (dmem_wdata),
         .o_dmem_mask  (dmem_mask),
+        .i_dmem_valid (dmem_valid),
         .i_dmem_rdata (dmem_rdata),
         .o_retire_valid     (valid),
         .o_retire_inst      (inst),
@@ -50,8 +62,46 @@ module unit_hart_tb;
         .o_retire_next_pc   (next_pc)
     );
 
-    reg [7:0] imem [0:255];
-    reg [7:0] dmem [0:255];
+    memory #(
+        .SIZE     (256),
+        .LATENCY  (4),
+        .INTERVAL (2)
+    ) u_imem (
+        .i_clk   (clk),
+        .i_rst   (rst),
+        .o_ready (imem_ready),
+        .i_addr  (imem_raddr),
+        .i_ren   (imem_ren),
+        .i_wen   (1'b0),
+        .i_mask  (4'b1111),
+        .i_wdata (32'd0),
+        .o_valid (imem_valid),
+        .o_addr  (),
+        .o_wdone (),
+        .o_rdata (imem_rdata)
+    );
+
+    memory #(
+        .SIZE     (256),
+        .LATENCY  (4),
+        .INTERVAL (2)
+    ) u_dmem (
+        .i_clk   (clk),
+        .i_rst   (rst),
+        .o_ready (dmem_ready),
+        .i_addr  (dmem_addr),
+        .i_ren   (dmem_ren),
+        .i_wen   (dmem_wen),
+        .i_mask  (dmem_mask),
+        .i_wdata (dmem_wdata),
+        .o_valid (dmem_rvalid),
+        .o_addr  (),
+        .o_wdone (dmem_wdone),
+        .o_rdata (dmem_rdata)
+    );
+
+    assign dmem_valid = dmem_rvalid;
+
     reg [31:0] regs [0:31];
     reg halted_seen;
     integer i;
@@ -60,33 +110,12 @@ module unit_hart_tb;
         input [31:0] addr;
         input [31:0] word;
         begin
-            imem[addr + 0] = word[7:0];
-            imem[addr + 1] = word[15:8];
-            imem[addr + 2] = word[23:16];
-            imem[addr + 3] = word[31:24];
+            u_imem.mem[addr + 0] = word[7:0];
+            u_imem.mem[addr + 1] = word[15:8];
+            u_imem.mem[addr + 2] = word[23:16];
+            u_imem.mem[addr + 3] = word[31:24];
         end
     endtask
-
-    // Instruction memory read
-    always @(*) begin
-        imem_rdata = {imem[imem_raddr + 3], imem[imem_raddr + 2], imem[imem_raddr + 1], imem[imem_raddr + 0]};
-    end
-
-    // Data memory read
-    always @(*) begin
-        if (dmem_ren)
-            dmem_rdata = {dmem[dmem_addr + 3], dmem[dmem_addr + 2], dmem[dmem_addr + 1], dmem[dmem_addr + 0]};
-        else
-            dmem_rdata = 32'h0;
-    end
-
-    // Data memory write
-    always @(posedge clk) begin
-        if (dmem_wen & dmem_mask[0]) dmem[dmem_addr + 0] <= dmem_wdata[7:0];
-        if (dmem_wen & dmem_mask[1]) dmem[dmem_addr + 1] <= dmem_wdata[15:8];
-        if (dmem_wen & dmem_mask[2]) dmem[dmem_addr + 2] <= dmem_wdata[23:16];
-        if (dmem_wen & dmem_mask[3]) dmem[dmem_addr + 3] <= dmem_wdata[31:24];
-    end
 
     // Architectural register scoreboard
     always @(posedge clk) begin
@@ -102,8 +131,8 @@ module unit_hart_tb;
         halted_seen = 1'b0;
         cycles = 0;
         for (i = 0; i < 256; i = i + 1) begin
-            imem[i] = 8'h00;
-            dmem[i] = 8'h00;
+            u_imem.mem[i] = 8'h00;
+            u_dmem.mem[i] = 8'h00;
         end
         for (i = 0; i < 32; i = i + 1) begin
             regs[i] = 32'h0000_0000;
@@ -128,7 +157,7 @@ module unit_hart_tb;
         rst = 0;
 
         // Run
-        while ((cycles < 200) && !halted_seen) begin
+        while ((cycles < 400) && !halted_seen) begin
             @(posedge clk);
             cycles = cycles + 1;
             if (valid && trap) begin
@@ -164,16 +193,12 @@ module unit_hart_tb;
         end
 
         // Check memory at address 0
-        if ({dmem[3], dmem[2], dmem[1], dmem[0]} !== 32'd17) begin
-            $display("FAIL unit_hart_tb: mem[0]=%h exp=00000011", {dmem[3], dmem[2], dmem[1], dmem[0]});
+        if ({u_dmem.mem[3], u_dmem.mem[2], u_dmem.mem[1], u_dmem.mem[0]} !== 32'd17) begin
+            $display("FAIL unit_hart_tb: mem[0]=%h exp=00000011", {u_dmem.mem[3], u_dmem.mem[2], u_dmem.mem[1], u_dmem.mem[0]});
             $finish;
         end
-        if ({dmem[7], dmem[6], dmem[5], dmem[4]} !== 32'd17) begin
-            $display("FAIL unit_hart_tb: mem[4]=%h exp=00000011", {dmem[7], dmem[6], dmem[5], dmem[4]});
-            $finish;
-        end
-        if (cycles > 16) begin
-            $display("FAIL unit_hart_tb: cycles=%0d exp<=16", cycles);
+        if ({u_dmem.mem[7], u_dmem.mem[6], u_dmem.mem[5], u_dmem.mem[4]} !== 32'd17) begin
+            $display("FAIL unit_hart_tb: mem[4]=%h exp=00000011", {u_dmem.mem[7], u_dmem.mem[6], u_dmem.mem[5], u_dmem.mem[4]});
             $finish;
         end
 

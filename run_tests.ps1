@@ -6,10 +6,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$iverilog = $env:IVERILOG
-if ([string]::IsNullOrWhiteSpace($iverilog)) { $iverilog = "iverilog" }
-$vvp = $env:VVP
-if ([string]::IsNullOrWhiteSpace($vvp)) { $vvp = "vvp" }
+function Resolve-Tool([string]$value, [string]$defaultName) {
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = $defaultName }
+    $cmd = Get-Command $value -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $cmd) { return $cmd.Source }
+    return $value
+}
+
+$iverilog = Resolve-Tool $env:IVERILOG "iverilog.exe"
+$vvp = Resolve-Tool $env:VVP "vvp.exe"
 $iverilogFlags = $env:IVERILOG_FLAGS
 if ([string]::IsNullOrWhiteSpace($iverilogFlags)) { $iverilogFlags = "-g2001" }
 
@@ -17,6 +22,7 @@ $buildDir = "build"
 if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }
 
 $rtl = @(
+    "rtl/cache.v",
     "rtl/hart.v",
     "rtl/decode.v",
     "rtl/execute.v",
@@ -39,7 +45,7 @@ $tests["unit_writeback"] = @{ Top = "unit_writeback_tb"; Sources = @("tests/unit
 $tests["unit_memory"] = @{ Top = "unit_memory_tb"; Sources = @("tests/unit_memory_tb.v", "rtl/memory.v") }
 $tests["unit_execute"] = @{ Top = "unit_execute_tb"; Sources = @("tests/unit_execute_tb.v", "rtl/execute.v", "lib/alu_control_unit.v", "lib/alu.v") }
 $tests["unit_decode"] = @{ Top = "unit_decode_tb"; Sources = @("tests/unit_decode_tb.v", "rtl/decode.v", "lib/rf.v", "lib/imm.v") }
-$tests["unit_hart"] = @{ Top = "unit_hart_tb"; Sources = @("tests/unit_hart_tb.v") + $rtl + $lib }
+$tests["unit_hart"] = @{ Top = "unit_hart_tb"; Sources = @("tests/unit_hart_tb.v", "rtl/tb_memory.v") + $rtl + $lib }
 
 if ($List) {
     $tests.Keys | Sort-Object | ForEach-Object { Write-Output $_ }
@@ -55,6 +61,7 @@ function Run-Test([string]$name) {
     $out = Join-Path $buildDir "$name.out"
 
     Write-Host "==> Compile $name"
+    if (Test-Path $out) { Remove-Item -Force $out }
     & $iverilog $iverilogFlags -s $top -o $out @srcs
     if ($LASTEXITCODE -ne 0) { throw "iverilog failed for $name" }
 

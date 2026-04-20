@@ -11,23 +11,45 @@ module hart #(
     input  wire        i_rst,
     // Instruction fetch goes through a read only instruction memory (imem)
     // port. The port accepts a 32-bit address (e.g. from the program counter)
-    // per cycle and combinationally returns a 32-bit instruction word. This
-    // is not representative of a realistic memory interface; it has been
-    // modeled as more similar to a DFF or SRAM to simplify phase 3. In
-    // later phases, you will replace this with a more realistic memory.
+    // per cycle and sequentially returns a 32-bit instruction word. For
+    // projects 6 and 7, this memory has been updated to be more realistic
+    // - reads are no longer combinational, and both read and write accesses
+    // take multiple cycles to complete.
     //
+    // The testbench memory models a fixed, multi cycle memory with partial
+    // pipelining. The memory will accept a new request every N cycles by
+    // asserting `mem_ready`, and if a request is made, the memory perform
+    // the request (read or write) after M cycles, asserting mem_valid to
+    // indicate the read data is ready (or the write is complete). Requests
+    // are completed in order. The values of N and M are deterministic, but
+    // may change between test cases - you must design your CPU to work
+    // correctly by looking at `mem_ready` and `mem_valid` rather than
+    // hardcoding a latency assumption.
+    //
+    // Indicates that the memory is ready to accept a new read request.
+    input  wire        i_imem_ready,
     // 32-bit read address for the instruction memory. This is expected to be
     // 4 byte aligned - that is, the two LSBs should be zero.
     output wire [31:0] o_imem_raddr,
-    // Instruction word fetched from memory, available on the same cycle.
+    // Issue a read request to the memory on this cycle. This should not be
+    // asserted if `i_imem_ready` is not asserted.
+    output wire        o_imem_ren,
+    // Indicates that a valid instruction word is being returned from memory.
+    input  wire        i_imem_valid,
+    // Instruction word fetched from memory, available sequentially some
+    // M cycles after a request (imem_ren) is issued.
     input  wire [31:0] i_imem_rdata,
+
     // Data memory accesses go through a separate read/write data memory (dmem)
     // that is shared between read (load) and write (stored). The port accepts
     // a 32-bit address, read or write enable, and mask (explained below) each
-    // cycle. Reads are combinational - values are available immediately after
-    // updating the address and asserting read enable. Writes occur on (and
-    // are visible at) the next clock edge.
+    // cycle.
     //
+    // The timing of the dmem interface is the same as the imem interface. See
+    // the documentation above.
+    //
+    // Indicates that the memory is ready to accept a new read or write request.
+    input  wire        i_dmem_ready,
     // Read/write address for the data memory. This should be 32-bit aligned
     // (i.e. the two LSB should be zero). See `o_dmem_mask` for how to perform
     // half-word and byte accesses at unaligned addresses.
@@ -40,8 +62,8 @@ module hart #(
     // When asserted, the memory will perform a write to the aligned address
     // `o_dmem_addr`. When asserted, the memory will write the bytes in
     // `o_dmem_wdata` (specified by the mask) to memory at the specified
-    // address on the next rising clock edge. It is illegal to assert this and
-    // `o_dmem_ren` on the same cycle.
+    // address. It is illegal to assert this and `o_dmem_ren` on the same
+    // cycle.
     output wire        o_dmem_wen,
     // The 32-bit word to write to memory when `o_dmem_wen` is asserted. When
     // write enable is asserted, the byte lanes specified by the mask will be
@@ -49,8 +71,8 @@ module hart #(
     // clock edge. The other byte lanes of the word will be unaffected.
     output wire [31:0] o_dmem_wdata,
     // The dmem interface expects word (32 bit) aligned addresses. However,
-    // WISC-25 supports byte and half-word loads and stores at unaligned and
-    // 16-bit aligned addresses, respectively. To support this, the access
+    // the processor supports byte and half-word loads and stores at unaligned
+    // and 16-bit aligned addresses, respectively. To support this, the access
     // mask specifies which bytes within the 32-bit word are actually read
     // from or written to memory.
     //
@@ -69,6 +91,8 @@ module hart #(
     // the value of the `sb` instruction left by 24 bits to place it in the
     // appropriate byte lane.
     output wire [ 3:0] o_dmem_mask,
+    // Indicates that a valid data word is being returned from memory.
+    input  wire        i_dmem_valid,
     // The 32-bit word read from data memory. When `o_dmem_ren` is asserted,
     // this will immediately reflect the contents of memory at the specified
     // address, for the bytes enabled by the mask. When read enable is not
@@ -121,11 +145,11 @@ module hart #(
     // ignored and can be treated as a don't care.
     output wire [31:0] o_retire_rd_wdata,
     output wire [31:0] o_retire_dmem_addr,
+    output wire [ 3:0] o_retire_dmem_mask,
     output wire        o_retire_dmem_ren,
     output wire        o_retire_dmem_wen,
-    output wire [ 3:0] o_retire_dmem_mask,
-    output wire [31:0] o_retire_dmem_wdata,
     output wire [31:0] o_retire_dmem_rdata,
+    output wire [31:0] o_retire_dmem_wdata,
     // The current program counter of the instruction being retired - i.e.
     // the instruction memory address that the instruction was fetched from.
     output wire [31:0] o_retire_pc,
@@ -143,6 +167,21 @@ module hart #(
     // -------------------------------------------------------------------------
     reg [31:0] pc_cur;
     reg        halted_cur;
+    reg        imem_pending_cur;
+    reg        imem_pending_kill_cur;
+    reg [31:0] imem_pending_pc_cur;
+    wire [31:0] imem_cache_mem_addr_cur;
+    wire        imem_cache_mem_ren_cur;
+    wire        imem_cache_mem_wen_cur;
+    wire [31:0] imem_cache_mem_wdata_cur;
+    wire        imem_cache_busy_cur;
+    wire [31:0] imem_cache_rdata_cur;
+    wire [31:0] dmem_cache_mem_addr_cur;
+    wire        dmem_cache_mem_ren_cur;
+    wire        dmem_cache_mem_wen_cur;
+    wire [31:0] dmem_cache_mem_wdata_cur;
+    wire        dmem_cache_busy_cur;
+    wire [31:0] dmem_cache_rdata_cur;
 
     // -------------------------------------------------------------------------
     // IF stage + IF/ID register
@@ -294,6 +333,7 @@ module hart #(
     reg         ex_mem_illegal_inst_cur;
     reg         ex_mem_pc_misalign_trap_cur;
     reg         ex_mem_ebreak_cur;
+    reg         ex_mem_dmem_req_sent_cur;
 
     wire        ex_mem_valid_next;
     wire [31:0] ex_mem_pc_next;
@@ -327,12 +367,21 @@ module hart #(
     wire [31:0] mem_dmem_addr_cur;
     wire [3:0]  mem_dmem_mask_cur;
     wire [31:0] mem_dmem_wdata_cur;
+    wire        mem_dmem_ren_raw_cur;
+    wire        mem_dmem_wen_raw_cur;
     wire        mem_dmem_ren_cur;
     wire        mem_dmem_wen_cur;
     wire [31:0] mem_load_data_cur;
     wire [31:0] mem_store_data_cur;
     wire        mem_misalign_trap_cur;
     wire        mem_store_data_fwd_cur;
+    wire        mem_stage_complete_cur;
+    wire        mem_stage_stall_cur;
+    wire        dmem_req_fire_cur;
+    wire        dmem_resp_fire_cur;
+    wire        ex_mem_has_dmem_req_cur;
+    wire        mem_dcache_req_ren_cur;
+    wire        mem_dcache_req_wen_cur;
 
     reg         mem_wb_valid_cur;
     reg  [31:0] mem_wb_pc_cur;
@@ -405,20 +454,78 @@ module hart #(
     wire        hazard_mem_cur;
     wire        hazard_wb_cur;
     wire        hazard_stall_cur;
+    wire        if_id_consumed_cur;
+    wire        if_id_buffer_available_cur;
+    wire        imem_req_fire_cur;
+    wire        imem_resp_fire_cur;
+    wire        imem_resp_accept_cur;
+    wire [31:0] imem_req_addr_cur;
+    wire [31:0] imem_resp_pc_cur;
+
+    // -------------------------------------------------------------------------
+    // Caches
+    // -------------------------------------------------------------------------
+    cache u_icache (
+        .i_clk      (i_clk),
+        .i_rst      (i_rst),
+        .i_mem_ready(i_imem_ready),
+        .o_mem_addr (imem_cache_mem_addr_cur),
+        .o_mem_ren  (imem_cache_mem_ren_cur),
+        .o_mem_wen  (imem_cache_mem_wen_cur),
+        .o_mem_wdata(imem_cache_mem_wdata_cur),
+        .i_mem_rdata(i_imem_rdata),
+        .i_mem_valid(i_imem_valid),
+        .o_busy     (imem_cache_busy_cur),
+        .i_req_addr (imem_req_addr_cur),
+        .i_req_ren  (imem_req_fire_cur),
+        .i_req_wen  (1'b0),
+        .i_req_mask (4'b1111),
+        .i_req_wdata(32'd0),
+        .o_res_rdata(imem_cache_rdata_cur)
+    );
+
+    cache u_dcache (
+        .i_clk      (i_clk),
+        .i_rst      (i_rst),
+        .i_mem_ready(i_dmem_ready),
+        .o_mem_addr (dmem_cache_mem_addr_cur),
+        .o_mem_ren  (dmem_cache_mem_ren_cur),
+        .o_mem_wen  (dmem_cache_mem_wen_cur),
+        .o_mem_wdata(dmem_cache_mem_wdata_cur),
+        .i_mem_rdata(i_dmem_rdata),
+        .i_mem_valid(i_dmem_valid),
+        .o_busy     (dmem_cache_busy_cur),
+        .i_req_addr (mem_dmem_addr_cur),
+        .i_req_ren  (mem_dcache_req_ren_cur),
+        .i_req_wen  (mem_dcache_req_wen_cur),
+        .i_req_mask (mem_dmem_mask_cur),
+        .i_req_wdata(mem_dmem_wdata_cur),
+        .o_res_rdata(dmem_cache_rdata_cur)
+    );
 
     // -------------------------------------------------------------------------
     // IF stage
     // -------------------------------------------------------------------------
     assign if_pc_cur       = pc_cur;
     assign if_pc_plus4_cur = pc_cur + 32'd4;
-    assign if_inst_cur     = i_imem_rdata;
+    assign if_inst_cur     = imem_cache_rdata_cur;
     assign pc_next         = ex_redirect_cur ? ex_control_target_cur : if_pc_plus4_cur;
 
-    assign o_imem_raddr = if_pc_cur;
+    assign if_id_consumed_cur         = if_id_valid_cur & ~hazard_stall_cur & ~mem_stage_stall_cur & ~ex_redirect_cur;
+    assign if_id_buffer_available_cur = ~if_id_valid_cur | if_id_consumed_cur;
+    assign imem_req_fire_cur          = ~halted_cur & ~imem_pending_cur & if_id_buffer_available_cur & ~ex_redirect_cur;
+    assign imem_req_addr_cur          = imem_pending_cur ? imem_pending_pc_cur : if_pc_cur;
+    assign imem_resp_fire_cur         = imem_pending_cur & ~imem_cache_busy_cur;
+    assign imem_resp_accept_cur       = (imem_req_fire_cur & ~imem_cache_busy_cur) |
+                                        (imem_resp_fire_cur & ~imem_pending_kill_cur & ~ex_redirect_cur);
+    assign imem_resp_pc_cur           = imem_pending_cur ? imem_pending_pc_cur : if_pc_cur;
 
-    assign if_id_valid_next    = 1'b1;
-    assign if_id_pc_next       = if_pc_cur;
-    assign if_id_pc_plus4_next = if_pc_plus4_cur;
+    assign o_imem_raddr = imem_cache_mem_addr_cur;
+    assign o_imem_ren   = imem_cache_mem_ren_cur;
+
+    assign if_id_valid_next    = imem_resp_accept_cur;
+    assign if_id_pc_next       = imem_resp_pc_cur;
+    assign if_id_pc_plus4_next = imem_resp_pc_cur + 32'd4;
     assign if_id_inst_next     = if_inst_cur;
 
     // -------------------------------------------------------------------------
@@ -585,7 +692,7 @@ module hart #(
     assign ex_control_target_cur  = id_ex_jump_cur ? ex_jump_target_cur : ex_branch_target_cur;
 
     assign ex_branch_taken_cur =
-        id_ex_valid_cur & id_ex_branch_cur &
+        id_ex_valid_cur & ~mem_stage_stall_cur & id_ex_branch_cur &
         ((id_ex_func3_cur == 3'b000) ?  ex_alu_eq_cur  : // beq
          (id_ex_func3_cur == 3'b001) ? ~ex_alu_eq_cur  : // bne
          (id_ex_func3_cur == 3'b100) ?  ex_alu_slt_cur : // blt
@@ -593,7 +700,7 @@ module hart #(
          (id_ex_func3_cur == 3'b110) ?  ex_alu_slt_cur : // bltu
          (id_ex_func3_cur == 3'b111) ? ~ex_alu_slt_cur : // bgeu
                                         1'b0);
-    assign ex_jump_taken_cur      = id_ex_valid_cur & id_ex_jump_cur;
+    assign ex_jump_taken_cur      = id_ex_valid_cur & ~mem_stage_stall_cur & id_ex_jump_cur;
     assign ex_control_taken_cur   = ex_branch_taken_cur | ex_jump_taken_cur;
     assign ex_pc_misalign_trap_cur= ex_control_taken_cur & (|ex_control_target_cur[1:0]);
     assign ex_redirect_cur        = ex_control_taken_cur & ~ex_pc_misalign_trap_cur;
@@ -637,55 +744,75 @@ module hart #(
     assign mem_store_data_cur = mem_store_data_fwd_cur ? mem_wb_load_data_cur
                                                        : ex_mem_store_data_cur;
 
-    memory u_memory (
+    dmem_access u_memory (
         .EffAddr         (ex_mem_alu_result_cur),
         .StoreData       (mem_store_data_cur),
         .Func3           (ex_mem_func3_cur),
         .MemRead         (mem_read_en_cur),
         .MemWrite        (mem_write_en_cur),
-        .i_dmem_rdata    (i_dmem_rdata),
+        .i_dmem_rdata    (dmem_cache_rdata_cur),
         .o_dmem_addr     (mem_dmem_addr_cur),
         .o_dmem_mask     (mem_dmem_mask_cur),
         .o_dmem_wdata    (mem_dmem_wdata_cur),
-        .o_dmem_ren      (mem_dmem_ren_cur),
-        .o_dmem_wen      (mem_dmem_wen_cur),
+        .o_dmem_ren      (mem_dmem_ren_raw_cur),
+        .o_dmem_wen      (mem_dmem_wen_raw_cur),
         .LoadData        (mem_load_data_cur),
         .MisalignTrap    (mem_misalign_trap_cur)
     );
 
-    assign o_dmem_addr  = mem_dmem_addr_cur;
-    assign o_dmem_mask  = mem_dmem_mask_cur;
-    assign o_dmem_wdata = mem_dmem_wdata_cur;
-    assign o_dmem_ren   = mem_dmem_ren_cur;
-    assign o_dmem_wen   = mem_dmem_wen_cur;
+    assign ex_mem_has_dmem_req_cur = ex_mem_valid_cur &
+                                     (ex_mem_mem_read_cur | ex_mem_mem_write_cur) &
+                                     ~mem_misalign_trap_cur;
+    assign dmem_req_fire_cur       = ex_mem_has_dmem_req_cur &
+                                     ~ex_mem_dmem_req_sent_cur;
+    assign dmem_resp_fire_cur      = ex_mem_valid_cur &
+                                     ex_mem_mem_read_cur &
+                                     ~mem_misalign_trap_cur &
+                                     (ex_mem_dmem_req_sent_cur | dmem_req_fire_cur) &
+                                     ~dmem_cache_busy_cur;
+    assign mem_stage_complete_cur  = ex_mem_valid_cur &
+                                     (~ex_mem_has_dmem_req_cur |
+                                      ~dmem_cache_busy_cur);
+    assign mem_stage_stall_cur     = ex_mem_valid_cur & ~mem_stage_complete_cur;
 
-    assign mem_wb_valid_next          = ex_mem_valid_cur;
-    assign mem_wb_pc_next             = ex_mem_pc_cur;
-    assign mem_wb_pc_plus4_next       = ex_mem_pc_plus4_cur;
-    assign mem_wb_next_pc_next        = ex_mem_next_pc_cur;
-    assign mem_wb_inst_next           = ex_mem_inst_cur;
-    assign mem_wb_rs1_raddr_next      = ex_mem_rs1_raddr_cur;
-    assign mem_wb_rs2_raddr_next      = ex_mem_rs2_raddr_cur;
-    assign mem_wb_rd_waddr_next       = ex_mem_rd_waddr_cur;
-    assign mem_wb_rs1_rdata_next      = ex_mem_rs1_rdata_cur;
-    assign mem_wb_rs2_rdata_next      = ex_mem_rs2_rdata_cur;
-    assign mem_wb_offset_next         = ex_mem_offset_cur;
-    assign mem_wb_alu_result_next     = ex_mem_alu_result_cur;
-    assign mem_wb_load_data_next      = mem_load_data_cur;
-    assign mem_wb_dmem_addr_next      = mem_dmem_addr_cur;
-    assign mem_wb_dmem_ren_next       = mem_dmem_ren_cur;
-    assign mem_wb_dmem_wen_next       = mem_dmem_wen_cur;
-    assign mem_wb_dmem_mask_next      = mem_dmem_mask_cur;
-    assign mem_wb_dmem_wdata_next     = mem_dmem_wdata_cur;
-    assign mem_wb_dmem_rdata_next     = i_dmem_rdata;
-    assign mem_wb_mem_to_reg_next     = ex_mem_mem_to_reg_cur;
-    assign mem_wb_lui_next            = ex_mem_lui_cur;
-    assign mem_wb_jump_next           = ex_mem_jump_cur;
-    assign mem_wb_reg_write_next      = ex_mem_reg_write_cur;
-    assign mem_wb_illegal_inst_next   = ex_mem_illegal_inst_cur;
-    assign mem_wb_pc_misalign_trap_next = ex_mem_pc_misalign_trap_cur;
-    assign mem_wb_misalign_trap_next  = mem_misalign_trap_cur;
-    assign mem_wb_ebreak_next         = ex_mem_ebreak_cur;
+    assign mem_dcache_req_ren_cur = mem_dmem_ren_raw_cur & dmem_req_fire_cur;
+    assign mem_dcache_req_wen_cur = mem_dmem_wen_raw_cur & dmem_req_fire_cur;
+    assign mem_dmem_ren_cur       = mem_dcache_req_ren_cur;
+    assign mem_dmem_wen_cur       = mem_dcache_req_wen_cur;
+
+    assign o_dmem_addr  = dmem_cache_mem_addr_cur;
+    assign o_dmem_mask  = (dmem_cache_mem_ren_cur | dmem_cache_mem_wen_cur) ? 4'b1111 : 4'b0000;
+    assign o_dmem_wdata = dmem_cache_mem_wdata_cur;
+    assign o_dmem_ren   = dmem_cache_mem_ren_cur;
+    assign o_dmem_wen   = dmem_cache_mem_wen_cur;
+
+    assign mem_wb_valid_next            = mem_stage_complete_cur;
+    assign mem_wb_pc_next               = mem_stage_complete_cur ? ex_mem_pc_cur : 32'd0;
+    assign mem_wb_pc_plus4_next         = mem_stage_complete_cur ? ex_mem_pc_plus4_cur : 32'd0;
+    assign mem_wb_next_pc_next          = mem_stage_complete_cur ? ex_mem_next_pc_cur : 32'd0;
+    assign mem_wb_inst_next             = mem_stage_complete_cur ? ex_mem_inst_cur : 32'd0;
+    assign mem_wb_rs1_raddr_next        = mem_stage_complete_cur ? ex_mem_rs1_raddr_cur : 5'd0;
+    assign mem_wb_rs2_raddr_next        = mem_stage_complete_cur ? ex_mem_rs2_raddr_cur : 5'd0;
+    assign mem_wb_rd_waddr_next         = mem_stage_complete_cur ? ex_mem_rd_waddr_cur : 5'd0;
+    assign mem_wb_rs1_rdata_next        = mem_stage_complete_cur ? ex_mem_rs1_rdata_cur : 32'd0;
+    assign mem_wb_rs2_rdata_next        = mem_stage_complete_cur ? ex_mem_rs2_rdata_cur : 32'd0;
+    assign mem_wb_offset_next           = mem_stage_complete_cur ? ex_mem_offset_cur : 32'd0;
+    assign mem_wb_alu_result_next       = mem_stage_complete_cur ? ex_mem_alu_result_cur : 32'd0;
+    assign mem_wb_load_data_next        = dmem_resp_fire_cur ? mem_load_data_cur : 32'd0;
+    assign mem_wb_dmem_addr_next        = mem_stage_complete_cur ? mem_dmem_addr_cur : 32'd0;
+    assign mem_wb_dmem_ren_next         = mem_stage_complete_cur ? mem_dmem_ren_raw_cur : 1'b0;
+    assign mem_wb_dmem_wen_next         = mem_stage_complete_cur ? mem_dmem_wen_raw_cur : 1'b0;
+    assign mem_wb_dmem_mask_next        = mem_stage_complete_cur ? mem_dmem_mask_cur : 4'd0;
+    assign mem_wb_dmem_wdata_next       = mem_stage_complete_cur ? mem_dmem_wdata_cur : 32'd0;
+    assign mem_wb_dmem_rdata_next       = dmem_resp_fire_cur ? dmem_cache_rdata_cur : 32'd0;
+    assign mem_wb_mem_to_reg_next       = mem_stage_complete_cur ? ex_mem_mem_to_reg_cur : 1'b0;
+    assign mem_wb_lui_next              = mem_stage_complete_cur ? ex_mem_lui_cur : 1'b0;
+    assign mem_wb_jump_next             = mem_stage_complete_cur ? ex_mem_jump_cur : 1'b0;
+    assign mem_wb_reg_write_next        = mem_stage_complete_cur ? ex_mem_reg_write_cur : 1'b0;
+    assign mem_wb_illegal_inst_next     = mem_stage_complete_cur ? ex_mem_illegal_inst_cur : 1'b0;
+    assign mem_wb_pc_misalign_trap_next = mem_stage_complete_cur ? ex_mem_pc_misalign_trap_cur : 1'b0;
+    assign mem_wb_misalign_trap_next    = mem_stage_complete_cur ? mem_misalign_trap_cur : 1'b0;
+    assign mem_wb_ebreak_next           = mem_stage_complete_cur ? ex_mem_ebreak_cur : 1'b0;
 
     // -------------------------------------------------------------------------
     // WB stage
@@ -736,6 +863,9 @@ module hart #(
         if (i_rst) begin
             pc_cur <= RESET_ADDR;
             halted_cur <= 1'b0;
+            imem_pending_cur <= 1'b0;
+            imem_pending_kill_cur <= 1'b0;
+            imem_pending_pc_cur <= 32'd0;
 
             if_id_valid_cur <= 1'b0;
             if_id_pc_cur <= 32'd0;
@@ -792,6 +922,7 @@ module hart #(
             ex_mem_illegal_inst_cur <= 1'b0;
             ex_mem_pc_misalign_trap_cur <= 1'b0;
             ex_mem_ebreak_cur <= 1'b0;
+            ex_mem_dmem_req_sent_cur <= 1'b0;
 
             mem_wb_valid_cur <= 1'b0;
             mem_wb_pc_cur <= 32'd0;
@@ -822,15 +953,114 @@ module hart #(
             mem_wb_ebreak_cur <= 1'b0;
         end else if (retire_halt_cur) begin
             halted_cur <= 1'b1;
+            imem_pending_cur <= 1'b0;
+            imem_pending_kill_cur <= 1'b0;
+            imem_pending_pc_cur <= 32'd0;
+
             if_id_valid_cur <= 1'b0;
+            if_id_pc_cur <= 32'd0;
+            if_id_pc_plus4_cur <= 32'd0;
+            if_id_inst_cur <= 32'd0;
+
             id_ex_valid_cur <= 1'b0;
+            id_ex_pc_cur <= 32'd0;
+            id_ex_pc_plus4_cur <= 32'd0;
+            id_ex_inst_cur <= 32'd0;
+            id_ex_rs1_raddr_cur <= 5'd0;
+            id_ex_rs2_raddr_cur <= 5'd0;
+            id_ex_rd_waddr_cur <= 5'd0;
+            id_ex_rs1_rdata_cur <= 32'd0;
+            id_ex_rs2_rdata_cur <= 32'd0;
+            id_ex_offset_cur <= 32'd0;
+            id_ex_opcode_cur <= 7'd0;
+            id_ex_func3_cur <= 3'd0;
+            id_ex_func7_cur <= 7'd0;
+            id_ex_lui_cur <= 1'b0;
+            id_ex_pc_src_cur <= 1'b0;
+            id_ex_alu_op_cur <= 3'd0;
+            id_ex_mem_write_cur <= 1'b0;
+            id_ex_mem_read_cur <= 1'b0;
+            id_ex_mem_to_reg_cur <= 1'b0;
+            id_ex_alu_src1_cur <= 1'b0;
+            id_ex_alu_src2_cur <= 1'b0;
+            id_ex_reg_write_cur <= 1'b0;
+            id_ex_jump_cur <= 1'b0;
+            id_ex_branch_cur <= 1'b0;
+            id_ex_illegal_inst_cur <= 1'b0;
+            id_ex_ebreak_cur <= 1'b0;
+
             ex_mem_valid_cur <= 1'b0;
+            ex_mem_pc_cur <= 32'd0;
+            ex_mem_pc_plus4_cur <= 32'd0;
+            ex_mem_next_pc_cur <= 32'd0;
+            ex_mem_inst_cur <= 32'd0;
+            ex_mem_rs1_raddr_cur <= 5'd0;
+            ex_mem_rs2_raddr_cur <= 5'd0;
+            ex_mem_rd_waddr_cur <= 5'd0;
+            ex_mem_rs1_rdata_cur <= 32'd0;
+            ex_mem_rs2_rdata_cur <= 32'd0;
+            ex_mem_offset_cur <= 32'd0;
+            ex_mem_alu_result_cur <= 32'd0;
+            ex_mem_store_data_cur <= 32'd0;
+            ex_mem_func3_cur <= 3'd0;
+            ex_mem_mem_write_cur <= 1'b0;
+            ex_mem_mem_read_cur <= 1'b0;
+            ex_mem_mem_to_reg_cur <= 1'b0;
+            ex_mem_lui_cur <= 1'b0;
+            ex_mem_jump_cur <= 1'b0;
+            ex_mem_reg_write_cur <= 1'b0;
+            ex_mem_illegal_inst_cur <= 1'b0;
+            ex_mem_pc_misalign_trap_cur <= 1'b0;
+            ex_mem_ebreak_cur <= 1'b0;
+            ex_mem_dmem_req_sent_cur <= 1'b0;
+
             mem_wb_valid_cur <= 1'b0;
+            mem_wb_pc_cur <= 32'd0;
+            mem_wb_pc_plus4_cur <= 32'd0;
+            mem_wb_next_pc_cur <= 32'd0;
+            mem_wb_inst_cur <= 32'd0;
+            mem_wb_rs1_raddr_cur <= 5'd0;
+            mem_wb_rs2_raddr_cur <= 5'd0;
+            mem_wb_rd_waddr_cur <= 5'd0;
+            mem_wb_rs1_rdata_cur <= 32'd0;
+            mem_wb_rs2_rdata_cur <= 32'd0;
+            mem_wb_offset_cur <= 32'd0;
+            mem_wb_alu_result_cur <= 32'd0;
+            mem_wb_load_data_cur <= 32'd0;
+            mem_wb_dmem_addr_cur <= 32'd0;
+            mem_wb_dmem_ren_cur <= 1'b0;
+            mem_wb_dmem_wen_cur <= 1'b0;
+            mem_wb_dmem_mask_cur <= 4'd0;
+            mem_wb_dmem_wdata_cur <= 32'd0;
+            mem_wb_dmem_rdata_cur <= 32'd0;
+            mem_wb_mem_to_reg_cur <= 1'b0;
+            mem_wb_lui_cur <= 1'b0;
+            mem_wb_jump_cur <= 1'b0;
+            mem_wb_reg_write_cur <= 1'b0;
+            mem_wb_illegal_inst_cur <= 1'b0;
+            mem_wb_pc_misalign_trap_cur <= 1'b0;
+            mem_wb_misalign_trap_cur <= 1'b0;
+            mem_wb_ebreak_cur <= 1'b0;
         end else if (~halted_cur) begin
-            if (ex_redirect_cur) begin
-                // Taken branch/jump redirects fetch and squashes younger instructions.
+            if (ex_redirect_cur)
+                pc_cur <= pc_next;
+            else if (imem_req_fire_cur)
                 pc_cur <= pc_next;
 
+            if (imem_resp_fire_cur) begin
+                imem_pending_cur <= 1'b0;
+                imem_pending_kill_cur <= 1'b0;
+                imem_pending_pc_cur <= 32'd0;
+            end else if (imem_req_fire_cur & imem_cache_busy_cur) begin
+                imem_pending_cur <= 1'b1;
+                imem_pending_kill_cur <= 1'b0;
+                imem_pending_pc_cur <= if_pc_cur;
+            end else if (ex_redirect_cur && imem_pending_cur) begin
+                imem_pending_kill_cur <= 1'b1;
+            end
+
+            if (ex_redirect_cur) begin
+                // Taken branch/jump redirects fetch and squashes younger instructions.
                 if_id_valid_cur <= 1'b0;
                 if_id_pc_cur <= 32'd0;
                 if_id_pc_plus4_cur <= 32'd0;
@@ -862,14 +1092,22 @@ module hart #(
                 id_ex_branch_cur <= 1'b0;
                 id_ex_illegal_inst_cur <= 1'b0;
                 id_ex_ebreak_cur <= 1'b0;
+            end else if (mem_stage_stall_cur) begin
+                if (imem_resp_accept_cur) begin
+                    if_id_valid_cur <= if_id_valid_next;
+                    if_id_pc_cur <= if_id_pc_next;
+                    if_id_pc_plus4_cur <= if_id_pc_plus4_next;
+                    if_id_inst_cur <= if_id_inst_next;
+                end
+
+                // Preserve the fully-resolved EX operands while this
+                // instruction waits behind a stalled memory operation.
+                // Otherwise a one-cycle WB forwarding value can disappear
+                // before the held EX instruction is allowed to advance.
+                id_ex_rs1_rdata_cur <= ex_rs1_value_cur;
+                id_ex_rs2_rdata_cur <= ex_rs2_value_cur;
             end else if (hazard_stall_cur) begin
                 // Stall fetch/decode and inject bubble into ID/EX.
-                pc_cur <= pc_cur;
-                if_id_valid_cur <= if_id_valid_cur;
-                if_id_pc_cur <= if_id_pc_cur;
-                if_id_pc_plus4_cur <= if_id_pc_plus4_cur;
-                if_id_inst_cur <= if_id_inst_cur;
-
                 id_ex_valid_cur <= 1'b0;
                 id_ex_pc_cur <= 32'd0;
                 id_ex_pc_plus4_cur <= 32'd0;
@@ -897,8 +1135,6 @@ module hart #(
                 id_ex_illegal_inst_cur <= 1'b0;
                 id_ex_ebreak_cur <= 1'b0;
             end else begin
-                pc_cur <= pc_next;
-
                 if_id_valid_cur <= if_id_valid_next;
                 if_id_pc_cur <= if_id_pc_next;
                 if_id_pc_plus4_cur <= if_id_pc_plus4_next;
@@ -932,29 +1168,34 @@ module hart #(
                 id_ex_ebreak_cur <= id_ex_ebreak_next;
             end
 
-            ex_mem_valid_cur <= ex_mem_valid_next;
-            ex_mem_pc_cur <= ex_mem_pc_next;
-            ex_mem_pc_plus4_cur <= ex_mem_pc_plus4_next;
-            ex_mem_next_pc_cur <= ex_mem_next_pc_next;
-            ex_mem_inst_cur <= ex_mem_inst_next;
-            ex_mem_rs1_raddr_cur <= ex_mem_rs1_raddr_next;
-            ex_mem_rs2_raddr_cur <= ex_mem_rs2_raddr_next;
-            ex_mem_rd_waddr_cur <= ex_mem_rd_waddr_next;
-            ex_mem_rs1_rdata_cur <= ex_mem_rs1_rdata_next;
-            ex_mem_rs2_rdata_cur <= ex_mem_rs2_rdata_next;
-            ex_mem_offset_cur <= ex_mem_offset_next;
-            ex_mem_alu_result_cur <= ex_mem_alu_result_next;
-            ex_mem_store_data_cur <= ex_mem_store_data_next;
-            ex_mem_func3_cur <= ex_mem_func3_next;
-            ex_mem_mem_write_cur <= ex_mem_mem_write_next;
-            ex_mem_mem_read_cur <= ex_mem_mem_read_next;
-            ex_mem_mem_to_reg_cur <= ex_mem_mem_to_reg_next;
-            ex_mem_lui_cur <= ex_mem_lui_next;
-            ex_mem_jump_cur <= ex_mem_jump_next;
-            ex_mem_reg_write_cur <= ex_mem_reg_write_next;
-            ex_mem_illegal_inst_cur <= ex_mem_illegal_inst_next;
-            ex_mem_pc_misalign_trap_cur <= ex_mem_pc_misalign_trap_next;
-            ex_mem_ebreak_cur <= ex_mem_ebreak_next;
+            if (mem_stage_stall_cur) begin
+                ex_mem_dmem_req_sent_cur <= ex_mem_dmem_req_sent_cur | dmem_req_fire_cur;
+            end else begin
+                ex_mem_valid_cur <= ex_mem_valid_next;
+                ex_mem_pc_cur <= ex_mem_pc_next;
+                ex_mem_pc_plus4_cur <= ex_mem_pc_plus4_next;
+                ex_mem_next_pc_cur <= ex_mem_next_pc_next;
+                ex_mem_inst_cur <= ex_mem_inst_next;
+                ex_mem_rs1_raddr_cur <= ex_mem_rs1_raddr_next;
+                ex_mem_rs2_raddr_cur <= ex_mem_rs2_raddr_next;
+                ex_mem_rd_waddr_cur <= ex_mem_rd_waddr_next;
+                ex_mem_rs1_rdata_cur <= ex_mem_rs1_rdata_next;
+                ex_mem_rs2_rdata_cur <= ex_mem_rs2_rdata_next;
+                ex_mem_offset_cur <= ex_mem_offset_next;
+                ex_mem_alu_result_cur <= ex_mem_alu_result_next;
+                ex_mem_store_data_cur <= ex_mem_store_data_next;
+                ex_mem_func3_cur <= ex_mem_func3_next;
+                ex_mem_mem_write_cur <= ex_mem_mem_write_next;
+                ex_mem_mem_read_cur <= ex_mem_mem_read_next;
+                ex_mem_mem_to_reg_cur <= ex_mem_mem_to_reg_next;
+                ex_mem_lui_cur <= ex_mem_lui_next;
+                ex_mem_jump_cur <= ex_mem_jump_next;
+                ex_mem_reg_write_cur <= ex_mem_reg_write_next;
+                ex_mem_illegal_inst_cur <= ex_mem_illegal_inst_next;
+                ex_mem_pc_misalign_trap_cur <= ex_mem_pc_misalign_trap_next;
+                ex_mem_ebreak_cur <= ex_mem_ebreak_next;
+                ex_mem_dmem_req_sent_cur <= 1'b0;
+            end
 
             mem_wb_valid_cur <= mem_wb_valid_next;
             mem_wb_pc_cur <= mem_wb_pc_next;

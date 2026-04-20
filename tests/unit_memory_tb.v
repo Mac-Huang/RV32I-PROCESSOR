@@ -16,7 +16,7 @@ module unit_memory_tb;
     wire [31:0] LoadData;
     wire        MisalignTrap;
 
-    memory dut (
+    dmem_access dut (
         .EffAddr     (EffAddr),
         .StoreData   (StoreData),
         .Func3       (Func3),
