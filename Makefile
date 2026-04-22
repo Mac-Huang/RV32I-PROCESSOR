@@ -1,5 +1,6 @@
 IVERILOG ?= iverilog
 VVP ?= vvp
+PYTHON ?= python3
 IVERILOG_FLAGS ?= -g2001
 
 BUILD_DIR := build
@@ -27,7 +28,8 @@ TESTS := \
 	unit_memory \
 	unit_execute \
 	unit_decode \
-	unit_hart
+	unit_hart \
+	hart_cpi
 
 unit_alu_TOP := unit_alu_tb
 unit_alu_SRCS := tests/unit_alu_tb.v lib/alu.v
@@ -56,7 +58,10 @@ unit_decode_SRCS := tests/unit_decode_tb.v rtl/decode.v lib/rf.v lib/imm.v
 unit_hart_TOP := unit_hart_tb
 unit_hart_SRCS := tests/unit_hart_tb.v rtl/tb_memory.v $(RTL_SRCS) $(LIB_SRCS)
 
-.PHONY: all test clean $(addprefix run-,$(TESTS))
+hart_cpi_TOP := hart_tb
+hart_cpi_SRCS := tb/tb.v rtl/tb_memory.v $(RTL_SRCS) $(LIB_SRCS)
+
+.PHONY: all test clean hart-grade run-hart_grade $(addprefix run-,$(TESTS))
 
 all: test
 
@@ -74,6 +79,9 @@ run-$(1): $(BUILD_DIR)/$(1).out
 endef
 
 $(foreach t,$(TESTS),$(eval $(call MAKE_TEST_RULES,$(t))))
+
+hart-grade run-hart_grade:
+	$(PYTHON) tests/test_hart.py
 
 clean:
 	rm -rf $(BUILD_DIR)

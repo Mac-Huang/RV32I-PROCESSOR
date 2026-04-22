@@ -170,6 +170,8 @@ module hart #(
     reg        imem_pending_cur;
     reg        imem_pending_kill_cur;
     reg [31:0] imem_pending_pc_cur;
+    reg        imem_pending_pred_taken_cur;
+    reg [31:0] imem_pending_pred_target_cur;
     wire [31:0] imem_cache_mem_addr_cur;
     wire        imem_cache_mem_ren_cur;
     wire        imem_cache_mem_wen_cur;
@@ -183,6 +185,15 @@ module hart #(
     wire        dmem_cache_busy_cur;
     wire [31:0] dmem_cache_rdata_cur;
 
+    localparam BP_ENTRIES = 128;
+    localparam BP_INDEX_W = 7;
+    localparam BP_TAG_W   = 23;
+
+    reg [BP_ENTRIES - 1:0] bp_valid_cur;
+    reg [BP_TAG_W - 1:0]   bp_tags_cur [BP_ENTRIES - 1:0];
+    reg [31:0]             bp_targets_cur [BP_ENTRIES - 1:0];
+    reg [1:0]              bp_counters_cur [BP_ENTRIES - 1:0];
+
     // -------------------------------------------------------------------------
     // IF stage + IF/ID register
     // -------------------------------------------------------------------------
@@ -195,11 +206,15 @@ module hart #(
     reg  [31:0] if_id_pc_cur;
     reg  [31:0] if_id_pc_plus4_cur;
     reg  [31:0] if_id_inst_cur;
+    reg         if_id_pred_taken_cur;
+    reg  [31:0] if_id_pred_target_cur;
 
     wire        if_id_valid_next;
     wire [31:0] if_id_pc_next;
     wire [31:0] if_id_pc_plus4_next;
     wire [31:0] if_id_inst_next;
+    wire        if_id_pred_taken_next;
+    wire [31:0] if_id_pred_target_next;
 
     // -------------------------------------------------------------------------
     // ID stage + ID/EX register
@@ -250,6 +265,8 @@ module hart #(
     reg         id_ex_branch_cur;
     reg         id_ex_illegal_inst_cur;
     reg         id_ex_ebreak_cur;
+    reg         id_ex_pred_taken_cur;
+    reg  [31:0] id_ex_pred_target_cur;
 
     wire        id_ex_valid_next;
     wire [31:0] id_ex_pc_next;
@@ -277,6 +294,8 @@ module hart #(
     wire        id_ex_branch_next;
     wire        id_ex_illegal_inst_next;
     wire        id_ex_ebreak_next;
+    wire        id_ex_pred_taken_next;
+    wire [31:0] id_ex_pred_target_next;
 
     // -------------------------------------------------------------------------
     // EX stage + EX/MEM register
@@ -296,9 +315,14 @@ module hart #(
     wire [31:0] ex_jump_target_raw_cur;
     wire [31:0] ex_jump_target_cur;
     wire [31:0] ex_control_target_cur;
+    wire [31:0] ex_pred_next_pc_cur;
     wire        ex_pc_misalign_trap_cur;
     wire        ex_redirect_cur;
     wire [31:0] ex_next_pc_cur;
+    wire        bp_update_cur;
+    wire        bp_actual_taken_cur;
+    wire [BP_INDEX_W - 1:0] bp_update_index_cur;
+    wire [BP_TAG_W - 1:0]   bp_update_tag_cur;
     wire [31:0] ex_mem_forward_data_cur;
     wire [31:0] mem_wb_forward_data_cur;
     wire        ex_ex_match_rs1_cur;
@@ -461,11 +485,33 @@ module hart #(
     wire        imem_resp_accept_cur;
     wire [31:0] imem_req_addr_cur;
     wire [31:0] imem_resp_pc_cur;
+    wire [BP_INDEX_W - 1:0] if_bp_index_cur;
+    wire [BP_TAG_W - 1:0]   if_bp_tag_cur;
+    wire                    if_bp_hit_cur;
+    wire                    if_cache_hit_cur;
+    wire                    if_inst_branch_cur;
+    wire                    if_inst_jal_cur;
+    wire [31:0]             if_branch_offset_cur;
+    wire [31:0]             if_jal_offset_cur;
+    wire                    if_static_pred_taken_cur;
+    wire [31:0]             if_static_pred_target_cur;
+    wire                    if_pred_taken_cur;
+    wire [31:0]             if_pred_target_cur;
+    wire [31:0]             if_pred_next_pc_cur;
+    wire                    imem_resp_pred_taken_cur;
+    wire [31:0]             imem_resp_pred_target_cur;
+    wire                    imem_resp_inst_branch_cur;
+    wire                    imem_resp_inst_jal_cur;
+    wire [31:0]             imem_resp_branch_offset_cur;
+    wire [31:0]             imem_resp_jal_offset_cur;
+    wire                    imem_resp_static_pred_taken_cur;
+    wire [31:0]             imem_resp_static_pred_target_cur;
+    wire                    imem_resp_late_redirect_cur;
 
     // -------------------------------------------------------------------------
     // Caches
     // -------------------------------------------------------------------------
-    cache u_icache (
+    cache #(.PREFETCH_EN(1)) u_icache (
         .i_clk      (i_clk),
         .i_rst      (i_rst),
         .i_mem_ready(i_imem_ready),
@@ -484,7 +530,7 @@ module hart #(
         .o_res_rdata(imem_cache_rdata_cur)
     );
 
-    cache u_dcache (
+    cache #(.PREFETCH_EN(0)) u_dcache (
         .i_clk      (i_clk),
         .i_rst      (i_rst),
         .i_mem_ready(i_dmem_ready),
@@ -509,7 +555,32 @@ module hart #(
     assign if_pc_cur       = pc_cur;
     assign if_pc_plus4_cur = pc_cur + 32'd4;
     assign if_inst_cur     = imem_cache_rdata_cur;
-    assign pc_next         = ex_redirect_cur ? ex_control_target_cur : if_pc_plus4_cur;
+    assign if_bp_index_cur      = if_pc_cur[BP_INDEX_W + 1:2];
+    assign if_bp_tag_cur        = if_pc_cur[31:BP_INDEX_W + 2];
+    assign if_bp_hit_cur        = bp_valid_cur[if_bp_index_cur] &
+                                  (bp_tags_cur[if_bp_index_cur] == if_bp_tag_cur);
+    assign if_cache_hit_cur     = imem_req_fire_cur & ~imem_cache_busy_cur;
+    assign if_inst_branch_cur   = if_inst_cur[6:0] == 7'b1100011;
+    assign if_inst_jal_cur      = if_inst_cur[6:0] == 7'b1101111;
+    assign if_branch_offset_cur = {{20{if_inst_cur[31]}}, if_inst_cur[7],
+                                   if_inst_cur[30:25], if_inst_cur[11:8],
+                                   1'b0};
+    assign if_jal_offset_cur    = {{12{if_inst_cur[31]}}, if_inst_cur[19:12],
+                                   if_inst_cur[20], if_inst_cur[30:21], 1'b0};
+    assign if_static_pred_taken_cur  = ~if_bp_hit_cur & if_cache_hit_cur &
+                                       (if_inst_jal_cur |
+                                        (if_inst_branch_cur & if_inst_cur[31]));
+    assign if_static_pred_target_cur = if_inst_jal_cur ? (if_pc_cur + if_jal_offset_cur) :
+                                                         (if_pc_cur + if_branch_offset_cur);
+    assign if_pred_taken_cur    = if_bp_hit_cur ? bp_counters_cur[if_bp_index_cur][1] :
+                                                   if_static_pred_taken_cur;
+    assign if_pred_target_cur   = if_bp_hit_cur ? (bp_counters_cur[if_bp_index_cur][1] ?
+                                                   bp_targets_cur[if_bp_index_cur] :
+                                                   if_pc_plus4_cur) :
+                                  (if_static_pred_taken_cur ? if_static_pred_target_cur :
+                                                              if_pc_plus4_cur);
+    assign if_pred_next_pc_cur  = if_pred_target_cur;
+    assign pc_next              = ex_redirect_cur ? ex_next_pc_cur : if_pred_next_pc_cur;
 
     assign if_id_consumed_cur         = if_id_valid_cur & ~hazard_stall_cur & ~mem_stage_stall_cur & ~ex_redirect_cur;
     assign if_id_buffer_available_cur = ~if_id_valid_cur | if_id_consumed_cur;
@@ -519,6 +590,34 @@ module hart #(
     assign imem_resp_accept_cur       = (imem_req_fire_cur & ~imem_cache_busy_cur) |
                                         (imem_resp_fire_cur & ~imem_pending_kill_cur & ~ex_redirect_cur);
     assign imem_resp_pc_cur           = imem_pending_cur ? imem_pending_pc_cur : if_pc_cur;
+    assign imem_resp_inst_branch_cur = if_inst_cur[6:0] == 7'b1100011;
+    assign imem_resp_inst_jal_cur    = if_inst_cur[6:0] == 7'b1101111;
+    assign imem_resp_branch_offset_cur = {{20{if_inst_cur[31]}}, if_inst_cur[7],
+                                          if_inst_cur[30:25], if_inst_cur[11:8],
+                                          1'b0};
+    assign imem_resp_jal_offset_cur    = {{12{if_inst_cur[31]}}, if_inst_cur[19:12],
+                                          if_inst_cur[20], if_inst_cur[30:21], 1'b0};
+    assign imem_resp_static_pred_taken_cur =
+        imem_pending_cur & ~imem_pending_pred_taken_cur &
+        (imem_resp_inst_jal_cur |
+         (imem_resp_inst_branch_cur & if_inst_cur[31]));
+    assign imem_resp_static_pred_target_cur =
+        imem_resp_inst_jal_cur ? (imem_resp_pc_cur + imem_resp_jal_offset_cur) :
+                                 (imem_resp_pc_cur + imem_resp_branch_offset_cur);
+    assign imem_resp_pred_taken_cur   = imem_pending_cur ?
+                                        (imem_pending_pred_taken_cur |
+                                         imem_resp_static_pred_taken_cur) :
+                                        if_pred_taken_cur;
+    assign imem_resp_pred_target_cur  = imem_pending_cur ?
+                                        (imem_pending_pred_taken_cur ?
+                                         imem_pending_pred_target_cur :
+                                         (imem_resp_static_pred_taken_cur ?
+                                          imem_resp_static_pred_target_cur :
+                                          imem_pending_pred_target_cur)) :
+                                        if_pred_target_cur;
+    assign imem_resp_late_redirect_cur = imem_resp_accept_cur &
+                                         imem_pending_cur &
+                                         imem_resp_static_pred_taken_cur;
 
     assign o_imem_raddr = imem_cache_mem_addr_cur;
     assign o_imem_ren   = imem_cache_mem_ren_cur;
@@ -527,6 +626,8 @@ module hart #(
     assign if_id_pc_next       = imem_resp_pc_cur;
     assign if_id_pc_plus4_next = imem_resp_pc_cur + 32'd4;
     assign if_id_inst_next     = if_inst_cur;
+    assign if_id_pred_taken_next  = imem_resp_pred_taken_cur;
+    assign if_id_pred_target_next = imem_resp_pred_target_cur;
 
     // -------------------------------------------------------------------------
     // ID stage
@@ -614,6 +715,8 @@ module hart #(
     assign id_ex_branch_next       = id_branch_cur;
     assign id_ex_illegal_inst_next = id_illegal_inst_cur;
     assign id_ex_ebreak_next       = id_ebreak_cur;
+    assign id_ex_pred_taken_next   = if_id_pred_taken_cur;
+    assign id_ex_pred_target_next  = if_id_pred_target_cur;
 
     // -------------------------------------------------------------------------
     // EX stage
@@ -703,8 +806,19 @@ module hart #(
     assign ex_jump_taken_cur      = id_ex_valid_cur & ~mem_stage_stall_cur & id_ex_jump_cur;
     assign ex_control_taken_cur   = ex_branch_taken_cur | ex_jump_taken_cur;
     assign ex_pc_misalign_trap_cur= ex_control_taken_cur & (|ex_control_target_cur[1:0]);
-    assign ex_redirect_cur        = ex_control_taken_cur & ~ex_pc_misalign_trap_cur;
-    assign ex_next_pc_cur         = ex_redirect_cur ? ex_control_target_cur : id_ex_pc_plus4_cur;
+    assign bp_actual_taken_cur    = ex_control_taken_cur & ~ex_pc_misalign_trap_cur;
+    assign ex_next_pc_cur         = bp_actual_taken_cur ? ex_control_target_cur : id_ex_pc_plus4_cur;
+    assign ex_pred_next_pc_cur    = id_ex_pred_taken_cur ? id_ex_pred_target_cur : id_ex_pc_plus4_cur;
+    assign ex_redirect_cur        = id_ex_valid_cur & ~mem_stage_stall_cur &
+                                    ~ex_pc_misalign_trap_cur &
+                                    (ex_next_pc_cur != ex_pred_next_pc_cur);
+    assign bp_update_cur          = id_ex_valid_cur & ~mem_stage_stall_cur &
+                                    (id_ex_branch_cur | id_ex_jump_cur) &
+                                    ~id_ex_illegal_inst_cur &
+                                    ~id_ex_ebreak_cur &
+                                    ~ex_pc_misalign_trap_cur;
+    assign bp_update_index_cur    = id_ex_pc_cur[BP_INDEX_W + 1:2];
+    assign bp_update_tag_cur      = id_ex_pc_cur[31:BP_INDEX_W + 2];
 
     assign ex_mem_valid_next        = id_ex_valid_cur;
     assign ex_mem_pc_next           = id_ex_pc_cur;
@@ -866,11 +980,16 @@ module hart #(
             imem_pending_cur <= 1'b0;
             imem_pending_kill_cur <= 1'b0;
             imem_pending_pc_cur <= 32'd0;
+            imem_pending_pred_taken_cur <= 1'b0;
+            imem_pending_pred_target_cur <= 32'd0;
+            bp_valid_cur <= {BP_ENTRIES{1'b0}};
 
             if_id_valid_cur <= 1'b0;
             if_id_pc_cur <= 32'd0;
             if_id_pc_plus4_cur <= 32'd0;
             if_id_inst_cur <= 32'd0;
+            if_id_pred_taken_cur <= 1'b0;
+            if_id_pred_target_cur <= 32'd0;
 
             id_ex_valid_cur <= 1'b0;
             id_ex_pc_cur <= 32'd0;
@@ -898,6 +1017,8 @@ module hart #(
             id_ex_branch_cur <= 1'b0;
             id_ex_illegal_inst_cur <= 1'b0;
             id_ex_ebreak_cur <= 1'b0;
+            id_ex_pred_taken_cur <= 1'b0;
+            id_ex_pred_target_cur <= 32'd0;
 
             ex_mem_valid_cur <= 1'b0;
             ex_mem_pc_cur <= 32'd0;
@@ -956,11 +1077,15 @@ module hart #(
             imem_pending_cur <= 1'b0;
             imem_pending_kill_cur <= 1'b0;
             imem_pending_pc_cur <= 32'd0;
+            imem_pending_pred_taken_cur <= 1'b0;
+            imem_pending_pred_target_cur <= 32'd0;
 
             if_id_valid_cur <= 1'b0;
             if_id_pc_cur <= 32'd0;
             if_id_pc_plus4_cur <= 32'd0;
             if_id_inst_cur <= 32'd0;
+            if_id_pred_taken_cur <= 1'b0;
+            if_id_pred_target_cur <= 32'd0;
 
             id_ex_valid_cur <= 1'b0;
             id_ex_pc_cur <= 32'd0;
@@ -988,6 +1113,8 @@ module hart #(
             id_ex_branch_cur <= 1'b0;
             id_ex_illegal_inst_cur <= 1'b0;
             id_ex_ebreak_cur <= 1'b0;
+            id_ex_pred_taken_cur <= 1'b0;
+            id_ex_pred_target_cur <= 32'd0;
 
             ex_mem_valid_cur <= 1'b0;
             ex_mem_pc_cur <= 32'd0;
@@ -1042,8 +1169,26 @@ module hart #(
             mem_wb_misalign_trap_cur <= 1'b0;
             mem_wb_ebreak_cur <= 1'b0;
         end else if (~halted_cur) begin
+            if (bp_update_cur) begin
+                bp_valid_cur[bp_update_index_cur] <= 1'b1;
+                bp_tags_cur[bp_update_index_cur] <= bp_update_tag_cur;
+                bp_targets_cur[bp_update_index_cur] <= ex_control_target_cur;
+                if (~bp_valid_cur[bp_update_index_cur] ||
+                    (bp_tags_cur[bp_update_index_cur] != bp_update_tag_cur)) begin
+                    bp_counters_cur[bp_update_index_cur] <= bp_actual_taken_cur ? 2'b10 : 2'b01;
+                end else if (bp_actual_taken_cur) begin
+                    if (bp_counters_cur[bp_update_index_cur] != 2'b11)
+                        bp_counters_cur[bp_update_index_cur] <= bp_counters_cur[bp_update_index_cur] + 1'b1;
+                end else begin
+                    if (bp_counters_cur[bp_update_index_cur] != 2'b00)
+                        bp_counters_cur[bp_update_index_cur] <= bp_counters_cur[bp_update_index_cur] - 1'b1;
+                end
+            end
+
             if (ex_redirect_cur)
                 pc_cur <= pc_next;
+            else if (imem_resp_late_redirect_cur)
+                pc_cur <= imem_resp_static_pred_target_cur;
             else if (imem_req_fire_cur)
                 pc_cur <= pc_next;
 
@@ -1051,10 +1196,14 @@ module hart #(
                 imem_pending_cur <= 1'b0;
                 imem_pending_kill_cur <= 1'b0;
                 imem_pending_pc_cur <= 32'd0;
+                imem_pending_pred_taken_cur <= 1'b0;
+                imem_pending_pred_target_cur <= 32'd0;
             end else if (imem_req_fire_cur & imem_cache_busy_cur) begin
                 imem_pending_cur <= 1'b1;
                 imem_pending_kill_cur <= 1'b0;
                 imem_pending_pc_cur <= if_pc_cur;
+                imem_pending_pred_taken_cur <= if_pred_taken_cur;
+                imem_pending_pred_target_cur <= if_pred_target_cur;
             end else if (ex_redirect_cur && imem_pending_cur) begin
                 imem_pending_kill_cur <= 1'b1;
             end
@@ -1065,6 +1214,8 @@ module hart #(
                 if_id_pc_cur <= 32'd0;
                 if_id_pc_plus4_cur <= 32'd0;
                 if_id_inst_cur <= 32'd0;
+                if_id_pred_taken_cur <= 1'b0;
+                if_id_pred_target_cur <= 32'd0;
 
                 id_ex_valid_cur <= 1'b0;
                 id_ex_pc_cur <= 32'd0;
@@ -1092,12 +1243,16 @@ module hart #(
                 id_ex_branch_cur <= 1'b0;
                 id_ex_illegal_inst_cur <= 1'b0;
                 id_ex_ebreak_cur <= 1'b0;
+                id_ex_pred_taken_cur <= 1'b0;
+                id_ex_pred_target_cur <= 32'd0;
             end else if (mem_stage_stall_cur) begin
                 if (imem_resp_accept_cur) begin
                     if_id_valid_cur <= if_id_valid_next;
                     if_id_pc_cur <= if_id_pc_next;
                     if_id_pc_plus4_cur <= if_id_pc_plus4_next;
                     if_id_inst_cur <= if_id_inst_next;
+                    if_id_pred_taken_cur <= if_id_pred_taken_next;
+                    if_id_pred_target_cur <= if_id_pred_target_next;
                 end
 
                 // Preserve the fully-resolved EX operands while this
@@ -1134,11 +1289,15 @@ module hart #(
                 id_ex_branch_cur <= 1'b0;
                 id_ex_illegal_inst_cur <= 1'b0;
                 id_ex_ebreak_cur <= 1'b0;
+                id_ex_pred_taken_cur <= 1'b0;
+                id_ex_pred_target_cur <= 32'd0;
             end else begin
                 if_id_valid_cur <= if_id_valid_next;
                 if_id_pc_cur <= if_id_pc_next;
                 if_id_pc_plus4_cur <= if_id_pc_plus4_next;
                 if_id_inst_cur <= if_id_inst_next;
+                if_id_pred_taken_cur <= if_id_pred_taken_next;
+                if_id_pred_target_cur <= if_id_pred_target_next;
 
                 id_ex_valid_cur <= id_ex_valid_next;
                 id_ex_pc_cur <= id_ex_pc_next;
@@ -1166,6 +1325,8 @@ module hart #(
                 id_ex_branch_cur <= id_ex_branch_next;
                 id_ex_illegal_inst_cur <= id_ex_illegal_inst_next;
                 id_ex_ebreak_cur <= id_ex_ebreak_next;
+                id_ex_pred_taken_cur <= id_ex_pred_taken_next;
+                id_ex_pred_target_cur <= id_ex_pred_target_next;
             end
 
             if (mem_stage_stall_cur) begin

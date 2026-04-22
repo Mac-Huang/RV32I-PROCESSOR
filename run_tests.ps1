@@ -15,6 +15,7 @@ function Resolve-Tool([string]$value, [string]$defaultName) {
 
 $iverilog = Resolve-Tool $env:IVERILOG "iverilog.exe"
 $vvp = Resolve-Tool $env:VVP "vvp.exe"
+$python = Resolve-Tool $env:PYTHON "python"
 $iverilogFlags = $env:IVERILOG_FLAGS
 if ([string]::IsNullOrWhiteSpace($iverilogFlags)) { $iverilogFlags = "-g2001" }
 
@@ -46,10 +47,17 @@ $tests["unit_memory"] = @{ Top = "unit_memory_tb"; Sources = @("tests/unit_memor
 $tests["unit_execute"] = @{ Top = "unit_execute_tb"; Sources = @("tests/unit_execute_tb.v", "rtl/execute.v", "lib/alu_control_unit.v", "lib/alu.v") }
 $tests["unit_decode"] = @{ Top = "unit_decode_tb"; Sources = @("tests/unit_decode_tb.v", "rtl/decode.v", "lib/rf.v", "lib/imm.v") }
 $tests["unit_hart"] = @{ Top = "unit_hart_tb"; Sources = @("tests/unit_hart_tb.v", "rtl/tb_memory.v") + $rtl + $lib }
+$tests["hart_cpi"] = @{ Top = "hart_tb"; Sources = @("tb/tb.v", "rtl/tb_memory.v") + $rtl + $lib }
 
 if ($List) {
     $tests.Keys | Sort-Object | ForEach-Object { Write-Output $_ }
+    Write-Output "hart_grade"
     exit 0
+}
+
+if ($Test -eq "hart_grade") {
+    & $python "tests/test_hart.py"
+    exit $LASTEXITCODE
 }
 
 function Run-Test([string]$name) {

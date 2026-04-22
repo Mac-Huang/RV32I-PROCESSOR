@@ -56,6 +56,9 @@ module decode #(
     wire is_jal       = (opcode == 7'b1101111);
     wire is_jalr      = (opcode == 7'b1100111);
     wire is_ebreak    = (Inst   == 32'h00100073);
+    wire rs1_used     = is_rtype | is_itype_alu | is_load | is_store |
+                        is_branch | is_jalr;
+    wire rs2_used     = is_rtype | is_store | is_branch;
 
     assign i_format =
             is_rtype                        ? 6'b000001 :
@@ -97,11 +100,10 @@ module decode #(
         .i_rd_wdata (WriteData)
     );
 
-    // Retire interface should expose raw instruction rs/rd fields.
-    assign o_retire_rs1_raddr = rs1_raddr_raw;
-    assign o_retire_rs1_rdata = rs1_rdata_raw;
-    assign o_retire_rs2_raddr = rs2_raddr_raw;
-    assign o_retire_rs2_rdata = rs2_rdata_raw;
+    assign o_retire_rs1_raddr = rs1_used ? rs1_raddr_raw : 5'd0;
+    assign o_retire_rs1_rdata = rs1_used ? rs1_rdata_raw : 32'd0;
+    assign o_retire_rs2_raddr = rs2_used ? rs2_raddr_raw : 5'd0;
+    assign o_retire_rs2_rdata = rs2_used ? rs2_rdata_raw : 32'd0;
     assign o_retire_rd_waddr  = (RegWrite & ~IllegalInst & ~EBreak) ? rd_waddr_raw : 5'b0;
 
     imm imm_gen (
