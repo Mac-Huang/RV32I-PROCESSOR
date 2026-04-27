@@ -185,14 +185,40 @@ module hart #(
     wire        dmem_cache_busy_cur;
     wire [31:0] dmem_cache_rdata_cur;
 
-    localparam BP_ENTRIES = 128;
-    localparam BP_INDEX_W = 7;
+    localparam BP_WAYS    = 2;
+    localparam BP_SET_W   = 7;
+    localparam BP_SETS    = 128;
     localparam BP_TAG_W   = 23;
 
-    reg [BP_ENTRIES - 1:0] bp_valid_cur;
-    reg [BP_TAG_W - 1:0]   bp_tags_cur [BP_ENTRIES - 1:0];
-    reg [31:0]             bp_targets_cur [BP_ENTRIES - 1:0];
-    reg [1:0]              bp_counters_cur [BP_ENTRIES - 1:0];
+    reg [BP_SETS - 1:0]   bp_valid0_cur;
+    reg [BP_SETS - 1:0]   bp_valid1_cur;
+    reg [BP_TAG_W - 1:0]  bp_tags0_cur [BP_SETS - 1:0];
+    reg [BP_TAG_W - 1:0]  bp_tags1_cur [BP_SETS - 1:0];
+    reg [31:0]            bp_targets0_cur [BP_SETS - 1:0];
+    reg [31:0]            bp_targets1_cur [BP_SETS - 1:0];
+    reg [1:0]             bp_counters0_cur [BP_SETS - 1:0];
+    reg [1:0]             bp_counters1_cur [BP_SETS - 1:0];
+    reg [BP_SETS - 1:0]   bp_repl_cur;
+
+    // Gshare direction predictor: separate 1024-entry PHT of 2-bit counters
+    // indexed by pc[11:2] XOR bp_ghr_cur[9:0]. Direction prediction comes from
+    // this PHT (when the BTB tag matches, so the target is also valid). The
+    // BTB itself remains PC-only for tag/target — separating the two avoids
+    // counter/target aliasing while still capturing global-history correlation.
+    localparam PHT_INDEX_W = 10;
+    localparam PHT_ENTRIES = 1 << PHT_INDEX_W;
+    reg [1:0]               bp_pht_cur [PHT_ENTRIES - 1:0];
+    reg [PHT_ENTRIES - 1:0] bp_pht_valid_cur;
+    reg [PHT_INDEX_W - 1:0] bp_ghr_cur;
+
+    // Return Address Stack (RAS). An 8-entry circular stack. Push on JAL
+    // with rd in {x1, x5}, pop on JALR with rs1 in {x1, x5} and rd not
+    // forming a coroutine-style push (rd != rs1 or rd == x0). The RAS is
+    // purely a prediction; mispredicts fall through to the EX-stage redirect.
+    localparam RAS_DEPTH = 8;
+    reg [31:0] ras_stack_cur [RAS_DEPTH - 1:0];
+    reg [2:0]  ras_head_cur;
+    reg        ras_valid_cur;
 
     // -------------------------------------------------------------------------
     // IF stage + IF/ID register
@@ -201,6 +227,8 @@ module hart #(
     wire [31:0] if_pc_plus4_cur;
     wire [31:0] if_inst_cur;
     wire [31:0] pc_next;
+    wire [31:0] id_next_pc_cur;
+    wire        id_redirect_cur;
 
     reg         if_id_valid_cur;
     reg  [31:0] if_id_pc_cur;
@@ -208,6 +236,7 @@ module hart #(
     reg  [31:0] if_id_inst_cur;
     reg         if_id_pred_taken_cur;
     reg  [31:0] if_id_pred_target_cur;
+    reg  [PHT_INDEX_W - 1:0] if_id_pht_index_cur;
 
     wire        if_id_valid_next;
     wire [31:0] if_id_pc_next;
@@ -215,6 +244,7 @@ module hart #(
     wire [31:0] if_id_inst_next;
     wire        if_id_pred_taken_next;
     wire [31:0] if_id_pred_target_next;
+    wire [PHT_INDEX_W - 1:0] if_id_pht_index_next;
 
     // -------------------------------------------------------------------------
     // ID stage + ID/EX register
@@ -267,6 +297,7 @@ module hart #(
     reg         id_ex_ebreak_cur;
     reg         id_ex_pred_taken_cur;
     reg  [31:0] id_ex_pred_target_cur;
+    reg  [PHT_INDEX_W - 1:0] id_ex_pht_index_cur;
 
     wire        id_ex_valid_next;
     wire [31:0] id_ex_pc_next;
@@ -296,6 +327,7 @@ module hart #(
     wire        id_ex_ebreak_next;
     wire        id_ex_pred_taken_next;
     wire [31:0] id_ex_pred_target_next;
+    wire [PHT_INDEX_W - 1:0] id_ex_pht_index_next;
 
     // -------------------------------------------------------------------------
     // EX stage + EX/MEM register
@@ -321,8 +353,11 @@ module hart #(
     wire [31:0] ex_next_pc_cur;
     wire        bp_update_cur;
     wire        bp_actual_taken_cur;
-    wire [BP_INDEX_W - 1:0] bp_update_index_cur;
-    wire [BP_TAG_W - 1:0]   bp_update_tag_cur;
+    wire [BP_SET_W - 1:0] bp_update_set_cur;
+    wire [BP_TAG_W - 1:0] bp_update_tag_cur;
+    wire                  bp_update_way0_hit_cur;
+    wire                  bp_update_way1_hit_cur;
+    wire                  bp_update_way_sel_cur;
     wire [31:0] ex_mem_forward_data_cur;
     wire [31:0] mem_wb_forward_data_cur;
     wire        ex_ex_match_rs1_cur;
@@ -485,9 +520,17 @@ module hart #(
     wire        imem_resp_accept_cur;
     wire [31:0] imem_req_addr_cur;
     wire [31:0] imem_resp_pc_cur;
-    wire [BP_INDEX_W - 1:0] if_bp_index_cur;
-    wire [BP_TAG_W - 1:0]   if_bp_tag_cur;
-    wire                    if_bp_hit_cur;
+    wire [BP_SET_W - 1:0]    if_bp_set_cur;
+    wire [BP_TAG_W - 1:0]    if_bp_tag_cur;
+    wire                     if_bp_way0_hit_cur;
+    wire                     if_bp_way1_hit_cur;
+    wire                     if_bp_hit_cur;
+    wire                     if_bp_hit_way_cur;
+    wire [31:0]              if_bp_target_cur;
+    wire [1:0]               if_bp_counter_cur;
+    wire [PHT_INDEX_W - 1:0] if_pht_index_cur;
+    wire                     if_pht_valid_cur;
+    wire [1:0]               if_pht_counter_cur;
     wire                    if_cache_hit_cur;
     wire                    if_inst_branch_cur;
     wire                    if_inst_jal_cur;
@@ -508,10 +551,21 @@ module hart #(
     wire [31:0]             imem_resp_static_pred_target_cur;
     wire                    imem_resp_late_redirect_cur;
 
+    // RAS detection wires (based on the instruction currently at IF that is
+    // about to be accepted into IF/ID). Only link-register forms push/pop.
+    wire        if_inst_jalr_cur;
+    wire [4:0]  if_inst_rd_cur;
+    wire [4:0]  if_inst_rs1_cur;
+    wire        if_is_ras_push_cur;
+    wire        if_is_ras_pop_cur;
+    wire [31:0] if_ras_pred_target_cur;
+    wire        ras_push_fire_cur;
+    wire        ras_pop_fire_cur;
+
     // -------------------------------------------------------------------------
     // Caches
     // -------------------------------------------------------------------------
-    cache #(.PREFETCH_EN(1)) u_icache (
+    cache #(.PREFETCH_EN(1), .LINE_WIDE(1), .EARLY_RESTART_EN(1)) u_icache (
         .i_clk      (i_clk),
         .i_rst      (i_rst),
         .i_mem_ready(i_imem_ready),
@@ -530,7 +584,7 @@ module hart #(
         .o_res_rdata(imem_cache_rdata_cur)
     );
 
-    cache #(.PREFETCH_EN(0)) u_dcache (
+    cache #(.PREFETCH_EN(1), .LINE_WIDE(0), .EARLY_RESTART_EN(1)) u_dcache (
         .i_clk      (i_clk),
         .i_rst      (i_rst),
         .i_mem_ready(i_dmem_ready),
@@ -555,10 +609,24 @@ module hart #(
     assign if_pc_cur       = pc_cur;
     assign if_pc_plus4_cur = pc_cur + 32'd4;
     assign if_inst_cur     = imem_cache_rdata_cur;
-    assign if_bp_index_cur      = if_pc_cur[BP_INDEX_W + 1:2];
-    assign if_bp_tag_cur        = if_pc_cur[31:BP_INDEX_W + 2];
-    assign if_bp_hit_cur        = bp_valid_cur[if_bp_index_cur] &
-                                  (bp_tags_cur[if_bp_index_cur] == if_bp_tag_cur);
+    assign if_bp_set_cur        = if_pc_cur[BP_SET_W + 1:2];
+    assign if_bp_tag_cur        = if_pc_cur[31:BP_SET_W + 2];
+    assign if_bp_way0_hit_cur   = bp_valid0_cur[if_bp_set_cur] &
+                                  (bp_tags0_cur[if_bp_set_cur] == if_bp_tag_cur);
+    assign if_bp_way1_hit_cur   = bp_valid1_cur[if_bp_set_cur] &
+                                  (bp_tags1_cur[if_bp_set_cur] == if_bp_tag_cur);
+    assign if_bp_hit_cur        = if_bp_way0_hit_cur | if_bp_way1_hit_cur;
+    assign if_bp_hit_way_cur    = if_bp_way1_hit_cur;
+    assign if_bp_target_cur     = if_bp_hit_way_cur ? bp_targets1_cur[if_bp_set_cur] :
+                                                      bp_targets0_cur[if_bp_set_cur];
+    assign if_bp_counter_cur    = if_bp_hit_way_cur ? bp_counters1_cur[if_bp_set_cur] :
+                                                      bp_counters0_cur[if_bp_set_cur];
+    // Gshare PHT lookup: index = pc[9:2] XOR GHR. The BTB still uses PC-only
+    // for tag/target storage; the PHT (separate 256-entry table) provides
+    // the direction prediction with global-history correlation.
+    assign if_pht_index_cur     = if_pc_cur[PHT_INDEX_W + 1:2] ^ bp_ghr_cur;
+    assign if_pht_valid_cur     = bp_pht_valid_cur[if_pht_index_cur];
+    assign if_pht_counter_cur   = if_pht_valid_cur ? bp_pht_cur[if_pht_index_cur] : 2'b01;
     assign if_cache_hit_cur     = imem_req_fire_cur & ~imem_cache_busy_cur;
     assign if_inst_branch_cur   = if_inst_cur[6:0] == 7'b1100011;
     assign if_inst_jal_cur      = if_inst_cur[6:0] == 7'b1101111;
@@ -572,15 +640,61 @@ module hart #(
                                         (if_inst_branch_cur & if_inst_cur[31]));
     assign if_static_pred_target_cur = if_inst_jal_cur ? (if_pc_cur + if_jal_offset_cur) :
                                                          (if_pc_cur + if_branch_offset_cur);
-    assign if_pred_taken_cur    = if_bp_hit_cur ? bp_counters_cur[if_bp_index_cur][1] :
-                                                   if_static_pred_taken_cur;
-    assign if_pred_target_cur   = if_bp_hit_cur ? (bp_counters_cur[if_bp_index_cur][1] ?
-                                                   bp_targets_cur[if_bp_index_cur] :
-                                                   if_pc_plus4_cur) :
-                                  (if_static_pred_taken_cur ? if_static_pred_target_cur :
-                                                              if_pc_plus4_cur);
+
+    // RAS detection and prediction target. Only looks at the current IF
+    // instruction (which is only meaningful when the I-cache actually
+    // returned an instruction word this cycle - if_cache_hit_cur).
+    assign if_inst_jalr_cur     = if_inst_cur[6:0] == 7'b1100111;
+    assign if_inst_rd_cur       = if_inst_cur[11:7];
+    assign if_inst_rs1_cur      = if_inst_cur[19:15];
+    // Valid instruction-on-the-bus: either a fresh IF hit, or a pending
+    // response arriving this cycle.
+    wire if_inst_present_cur = if_cache_hit_cur | imem_resp_fire_cur;
+    assign if_is_ras_push_cur   = if_inst_present_cur & if_inst_jal_cur &
+                                  ((if_inst_rd_cur == 5'd1) | (if_inst_rd_cur == 5'd5));
+    assign if_is_ras_pop_cur    = if_inst_present_cur & if_inst_jalr_cur &
+                                  ((if_inst_rs1_cur == 5'd1) | (if_inst_rs1_cur == 5'd5)) &
+                                  ((if_inst_rd_cur == 5'd0) |
+                                   (if_inst_rd_cur != if_inst_rs1_cur));
+    assign if_ras_pred_target_cur = ras_stack_cur[ras_head_cur - 3'd1];
+
+    // Base prediction combines BTB + static prediction as before. RAS
+    // overrides the target for JALR-return when the stack is non-empty.
+    wire        if_base_pred_taken_cur;
+    wire [31:0] if_base_pred_target_cur;
+    // Direction prediction priority:
+    //   1) JAL/JALR are unconditional taken when BTB hits — PHT is bypassed.
+    //   2) Conditional branches use the gshare PHT counter.
+    //   3) BTB miss falls back to static prediction (JAL taken, backward
+    //      branches taken, forward not-taken).
+    // When the I-cache hasn't returned an instruction yet (cold IF), neither
+    // if_inst_branch_cur nor if_inst_jal_cur is meaningful, so we can't
+    // distinguish unconditional from conditional. Default in that case is
+    // the BTB counter, which historically tracked direction correctly even
+    // for JAL (it always saturates to taken).
+    wire if_unconditional_at_if_cur = if_inst_present_cur &
+                                      (if_inst_jal_cur | if_inst_jalr_cur);
+    wire if_conditional_at_if_cur   = if_inst_present_cur & if_inst_branch_cur;
+    wire if_btb_dir_taken_cur =
+        if_unconditional_at_if_cur ? 1'b1 :
+        if_conditional_at_if_cur   ? if_pht_counter_cur[1] :
+                                     if_bp_counter_cur[1];
+    assign if_base_pred_taken_cur  = if_bp_hit_cur ? if_btb_dir_taken_cur :
+                                                      if_static_pred_taken_cur;
+    assign if_base_pred_target_cur = if_bp_hit_cur ? (if_btb_dir_taken_cur ?
+                                                      if_bp_target_cur :
+                                                      if_pc_plus4_cur) :
+                                     (if_static_pred_taken_cur ? if_static_pred_target_cur :
+                                                                 if_pc_plus4_cur);
+    assign if_pred_taken_cur    = (if_is_ras_pop_cur & ras_valid_cur) | if_base_pred_taken_cur;
+    assign if_pred_target_cur   = (if_is_ras_pop_cur & ras_valid_cur) ? if_ras_pred_target_cur :
+                                                                        if_base_pred_target_cur;
     assign if_pred_next_pc_cur  = if_pred_target_cur;
-    assign pc_next              = ex_redirect_cur ? ex_next_pc_cur : if_pred_next_pc_cur;
+    // Priority: EX-stage JALR mispredict > ID-stage direct-branch/JAL
+    // mispredict > IF-stage prediction.
+    assign pc_next              = ex_redirect_cur ? ex_next_pc_cur :
+                                  id_redirect_cur ? id_next_pc_cur :
+                                                    if_pred_next_pc_cur;
 
     assign if_id_consumed_cur         = if_id_valid_cur & ~hazard_stall_cur & ~mem_stage_stall_cur & ~ex_redirect_cur;
     assign if_id_buffer_available_cur = ~if_id_valid_cur | if_id_consumed_cur;
@@ -619,6 +733,14 @@ module hart #(
                                          imem_pending_cur &
                                          imem_resp_static_pred_taken_cur;
 
+    // RAS push/pop fire whenever an IF instruction is actually committed to
+    // IF/ID. Redirects (EX squash) do not unwind speculative pushes/pops in
+    // this implementation, which is acceptable since RAS is purely a
+    // predictor - mispredicts still fall through to the EX redirect.
+    assign ras_push_fire_cur = imem_resp_accept_cur & if_is_ras_push_cur & ~ex_redirect_cur;
+    assign ras_pop_fire_cur  = imem_resp_accept_cur & if_is_ras_pop_cur & ~ex_redirect_cur &
+                               ras_valid_cur;
+
     assign o_imem_raddr = imem_cache_mem_addr_cur;
     assign o_imem_ren   = imem_cache_mem_ren_cur;
 
@@ -628,6 +750,10 @@ module hart #(
     assign if_id_inst_next     = if_inst_cur;
     assign if_id_pred_taken_next  = imem_resp_pred_taken_cur;
     assign if_id_pred_target_next = imem_resp_pred_target_cur;
+    // Capture the PHT index used at fetch so the EX stage can update the
+    // exact same PHT entry — global history is the GHR seen at fetch, not
+    // the GHR seen at update.
+    assign if_id_pht_index_next   = if_pht_index_cur;
 
     // -------------------------------------------------------------------------
     // ID stage
@@ -676,18 +802,155 @@ module hart #(
     assign id_rs2_ex_used_cur = (id_opcode_cur == 7'b0110011) |  // R-type
                                 (id_opcode_cur == 7'b1100011);   // branch
 
-    assign hazard_ex_cur = if_id_valid_cur &
-                           id_ex_valid_cur &
-                           id_ex_mem_read_cur &
-                           (id_ex_rd_waddr_cur != 5'd0) &
-                           ((id_rs1_used_cur & (id_rs1_raddr_cur == id_ex_rd_waddr_cur)) |
-                            (id_rs2_ex_used_cur & (id_rs2_raddr_cur == id_ex_rd_waddr_cur)));
+    // ----- ID-stage early branch / JAL resolution -----
+    // Resolving direct branches (BEQ/BNE/BLT/BGE/BLTU/BGEU) and JAL in ID
+    // drops the mispredict penalty from 3 cycles (EX-resolution) to 1 cycle
+    // (just squash the bubble the IF inserted). JALR still resolves at EX
+    // because its target depends on rs1 which may need EX-time forwarding.
+    wire        id_is_branch_cur;
+    wire        id_is_jal_cur;
+    wire        id_is_jalr_cur;
+    wire [2:0]  id_func3_cur;
+    wire [31:0] id_pc_cur_w;
+    wire [31:0] id_pc_plus4_cur_w;
+    wire [31:0] id_branch_target_cur;
+    wire [31:0] id_jal_target_cur;
+    wire [31:0] id_control_target_cur;
+    wire [31:0] id_fwd_rs1_cur;
+    wire [31:0] id_fwd_rs2_cur;
+    wire        id_ex_match_rs1_cur;
+    wire        id_ex_match_rs2_cur;
+    wire        id_mem_match_rs1_cur;
+    wire        id_mem_match_rs2_cur;
+    wire        id_has_producer_ahead_rs1_cur;
+    wire        id_has_producer_ahead_rs2_cur;
+    wire        id_branch_stall_cur;
+    wire        id_alu_eq_cur;
+    wire        id_alu_slt_cur;
+    wire        id_alu_sltu_cur;
+    wire        id_branch_taken_cur;
+    wire        id_jal_taken_cur;
+    wire        id_control_taken_cur;
+    wire [31:0] id_pred_next_pc_cur;
+    wire        id_pc_misalign_trap_cur;
+
+    assign id_is_branch_cur   = (id_opcode_cur == 7'b1100011);
+    assign id_is_jal_cur      = (id_opcode_cur == 7'b1101111);
+    assign id_is_jalr_cur     = (id_opcode_cur == 7'b1100111);
+    assign id_func3_cur       = if_id_inst_cur[14:12];
+    assign id_pc_cur_w        = if_id_pc_cur;
+    assign id_pc_plus4_cur_w  = if_id_pc_plus4_cur;
+
+    // ID-stage forwarding from EX/MEM (previous instruction's alu/lui/jump
+    // result) and MEM/WB (one earlier - RF bypass usually handles this but
+    // we bypass here explicitly too). Load data from EX/MEM is NOT
+    // forwardable at ID yet; that case stalls.
+    assign id_ex_match_rs1_cur = ex_mem_valid_cur & ex_mem_reg_write_cur &
+                                 ~ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_rs1_raddr_cur);
+    assign id_ex_match_rs2_cur = ex_mem_valid_cur & ex_mem_reg_write_cur &
+                                 ~ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_rs2_raddr_cur);
+    assign id_mem_match_rs1_cur = mem_wb_valid_cur & mem_wb_reg_write_cur &
+                                  ~id_ex_match_rs1_cur &
+                                  (mem_wb_rd_waddr_cur != 5'd0) &
+                                  (mem_wb_rd_waddr_cur == id_rs1_raddr_cur);
+    assign id_mem_match_rs2_cur = mem_wb_valid_cur & mem_wb_reg_write_cur &
+                                  ~id_ex_match_rs2_cur &
+                                  (mem_wb_rd_waddr_cur != 5'd0) &
+                                  (mem_wb_rd_waddr_cur == id_rs2_raddr_cur);
+
+    // A producer currently in EX (ID/EX register) whose ALU/LUI/JAL result is
+    // computed combinationally this cycle can be forwarded directly into the
+    // ID-stage branch comparator. Loads are excluded: their data is not
+    // available until after the MEM stage, so a load producer still forces
+    // id_branch_stall_cur below (1-cycle bubble) and is later satisfied via
+    // the MEM-live load-forward path into EX operands.
+    wire        id_ex_is_load_cur = id_ex_valid_cur & id_ex_mem_read_cur;
+    wire        id_ex_is_alu_producer_cur = id_ex_valid_cur &
+                                            id_ex_reg_write_cur &
+                                            ~id_ex_mem_to_reg_cur;
+    wire [31:0] id_ex_forward_data_cur = id_ex_jump_cur ? id_ex_pc_plus4_cur :
+                                         id_ex_lui_cur  ? id_ex_offset_cur :
+                                                          ex_alu_result_cur;
+    wire        id_exlive_match_rs1_cur = id_ex_is_alu_producer_cur &
+                                          (id_ex_rd_waddr_cur != 5'd0) &
+                                          (id_ex_rd_waddr_cur == id_rs1_raddr_cur);
+    wire        id_exlive_match_rs2_cur = id_ex_is_alu_producer_cur &
+                                          (id_ex_rd_waddr_cur != 5'd0) &
+                                          (id_ex_rd_waddr_cur == id_rs2_raddr_cur);
+
+    assign id_fwd_rs1_cur = id_exlive_match_rs1_cur ? id_ex_forward_data_cur :
+                            id_ex_match_rs1_cur     ? ex_mem_forward_data_cur :
+                            id_mem_match_rs1_cur    ? mem_wb_forward_data_cur :
+                                                      id_rs1_rdata_cur;
+    assign id_fwd_rs2_cur = id_exlive_match_rs2_cur ? id_ex_forward_data_cur :
+                            id_ex_match_rs2_cur     ? ex_mem_forward_data_cur :
+                            id_mem_match_rs2_cur    ? mem_wb_forward_data_cur :
+                                                      id_rs2_rdata_cur;
+
+    // Stall when a producer of the branch's rs1 or rs2 is one step ahead at
+    // ID/EX AND that producer is a load (whose data is not yet available).
+    // Non-load ID/EX producers are handled by the id_exlive_* forward path
+    // above, so they no longer require a stall.
+    assign id_has_producer_ahead_rs1_cur = id_ex_is_load_cur &
+                                           (id_ex_rd_waddr_cur != 5'd0) &
+                                           (id_ex_rd_waddr_cur == id_rs1_raddr_cur);
+    assign id_has_producer_ahead_rs2_cur = id_ex_is_load_cur &
+                                           (id_ex_rd_waddr_cur != 5'd0) &
+                                           (id_ex_rd_waddr_cur == id_rs2_raddr_cur);
+    assign id_branch_stall_cur = if_id_valid_cur & id_is_branch_cur &
+                                 ((id_rs1_used_cur & id_has_producer_ahead_rs1_cur) |
+                                  (id_rs2_ex_used_cur & id_has_producer_ahead_rs2_cur));
+
+    // ID-stage comparator.
+    assign id_alu_eq_cur   = (id_fwd_rs1_cur == id_fwd_rs2_cur);
+    assign id_alu_slt_cur  = (id_fwd_rs1_cur[31] != id_fwd_rs2_cur[31]) ?
+                             id_fwd_rs1_cur[31] :
+                             (id_fwd_rs1_cur < id_fwd_rs2_cur);
+    assign id_alu_sltu_cur = (id_fwd_rs1_cur < id_fwd_rs2_cur);
+    assign id_branch_taken_cur = if_id_valid_cur & ~id_branch_stall_cur & ~mem_stage_stall_cur &
+                                 id_is_branch_cur &
+                                 ((id_func3_cur == 3'b000) ?  id_alu_eq_cur   :
+                                  (id_func3_cur == 3'b001) ? ~id_alu_eq_cur   :
+                                  (id_func3_cur == 3'b100) ?  id_alu_slt_cur  :
+                                  (id_func3_cur == 3'b101) ? ~id_alu_slt_cur  :
+                                  (id_func3_cur == 3'b110) ?  id_alu_sltu_cur :
+                                  (id_func3_cur == 3'b111) ? ~id_alu_sltu_cur :
+                                                              1'b0);
+    assign id_jal_taken_cur    = if_id_valid_cur & ~mem_stage_stall_cur & id_is_jal_cur;
+    assign id_control_taken_cur = id_branch_taken_cur | id_jal_taken_cur;
+
+    assign id_branch_target_cur = id_pc_cur_w + id_offset_cur;
+    assign id_jal_target_cur    = id_pc_cur_w + id_offset_cur;
+    assign id_control_target_cur = id_is_jal_cur ? id_jal_target_cur : id_branch_target_cur;
+
+    assign id_pc_misalign_trap_cur = id_control_taken_cur & (|id_control_target_cur[1:0]);
+
+    assign id_next_pc_cur      = id_control_taken_cur ? id_control_target_cur : id_pc_plus4_cur_w;
+    assign id_pred_next_pc_cur = if_id_pred_taken_cur ? if_id_pred_target_cur : id_pc_plus4_cur_w;
+    assign id_redirect_cur     = if_id_valid_cur & ~id_branch_stall_cur & ~mem_stage_stall_cur &
+                                 (id_is_branch_cur | id_is_jal_cur) &
+                                 ~id_pc_misalign_trap_cur &
+                                 (id_next_pc_cur != id_pred_next_pc_cur);
+
+    // Load-use hazard: no longer stalls, because a MEM-live load-forwarding
+    // path from EX/MEM to the EX operands handles both the cache-hit case
+    // (data flows through in the cycle the load completes) and the
+    // cache-miss case (mem_stage_stall_cur holds the consumer in ID/EX
+    // until the miss completes, at which point the live-load forward
+    // delivers the data into EX operands). This eliminates the 1-cycle
+    // bubble the previous stall injected on every load-use pair.
+    assign hazard_ex_cur = 1'b0;
 
     assign hazard_mem_cur = 1'b0;
 
     assign hazard_wb_cur = 1'b0;
 
-    assign hazard_stall_cur = hazard_ex_cur | hazard_mem_cur | hazard_wb_cur;
+    assign hazard_stall_cur = hazard_ex_cur | hazard_mem_cur | hazard_wb_cur |
+                              id_branch_stall_cur;
 
     assign id_ex_valid_next        = if_id_valid_cur;
     assign id_ex_pc_next           = if_id_pc_cur;
@@ -717,6 +980,7 @@ module hart #(
     assign id_ex_ebreak_next       = id_ebreak_cur;
     assign id_ex_pred_taken_next   = if_id_pred_taken_cur;
     assign id_ex_pred_target_next  = if_id_pred_target_cur;
+    assign id_ex_pht_index_next    = if_id_pht_index_cur;
 
     // -------------------------------------------------------------------------
     // EX stage
@@ -725,6 +989,16 @@ module hart #(
                                      ex_mem_lui_cur  ? ex_mem_offset_cur :
                                                        ex_mem_alu_result_cur;
     assign mem_wb_forward_data_cur = wb_write_data_cur;
+
+    // A load in EX/MEM that completes this cycle (D$ hit) can be forwarded
+    // live to an ID/EX consumer, eliminating the 1-cycle load-use bubble on
+    // hits. On a miss (dmem_cache_busy_cur), we fall back to the regular
+    // stall.
+    wire ex_mem_load_live_cur = ex_mem_valid_cur &
+                                ex_mem_mem_read_cur &
+                                ~mem_misalign_trap_cur &
+                                (ex_mem_dmem_req_sent_cur | dmem_req_fire_cur) &
+                                ~dmem_cache_busy_cur;
 
     assign ex_ex_match_rs1_cur = id_ex_valid_cur &
                                  ex_mem_valid_cur &
@@ -739,33 +1013,55 @@ module hart #(
                                  (ex_mem_rd_waddr_cur != 5'd0) &
                                  (ex_mem_rd_waddr_cur == id_ex_rs2_raddr_cur);
 
+    // MEM-live load forward: match when the load currently at EX/MEM is
+    // completing this cycle and the ID/EX consumer reads the load's rd.
+    wire ex_load_match_rs1_cur = id_ex_valid_cur &
+                                 ex_mem_load_live_cur &
+                                 ex_mem_reg_write_cur &
+                                 ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_ex_rs1_raddr_cur);
+    wire ex_load_match_rs2_cur = id_ex_valid_cur &
+                                 ex_mem_load_live_cur &
+                                 ex_mem_reg_write_cur &
+                                 ex_mem_mem_to_reg_cur &
+                                 (ex_mem_rd_waddr_cur != 5'd0) &
+                                 (ex_mem_rd_waddr_cur == id_ex_rs2_raddr_cur);
+
     assign mem_ex_match_rs1_cur = id_ex_valid_cur &
                                   mem_wb_valid_cur &
                                   mem_wb_reg_write_cur &
                                   (mem_wb_rd_waddr_cur != 5'd0) &
                                   ~ex_ex_match_rs1_cur &
+                                  ~ex_load_match_rs1_cur &
                                   (mem_wb_rd_waddr_cur == id_ex_rs1_raddr_cur);
     assign mem_ex_match_rs2_cur = id_ex_valid_cur &
                                   mem_wb_valid_cur &
                                   mem_wb_reg_write_cur &
                                   (mem_wb_rd_waddr_cur != 5'd0) &
                                   ~ex_ex_match_rs2_cur &
+                                  ~ex_load_match_rs2_cur &
                                   (mem_wb_rd_waddr_cur == id_ex_rs2_raddr_cur);
 
-    assign ex_forward_a_sel_cur = ex_ex_match_rs1_cur ? 2'b10 :
-                                  mem_ex_match_rs1_cur ? 2'b01 :
-                                                         2'b00;
-    assign ex_forward_b_sel_cur = ex_ex_match_rs2_cur ? 2'b10 :
-                                  mem_ex_match_rs2_cur ? 2'b01 :
-                                                         2'b00;
+    // Regular 2-bit forwarding sel: 10 = EX/MEM, 01 = MEM/WB, 00 = RF.
+    assign ex_forward_a_sel_cur = ex_ex_match_rs1_cur   ? 2'b10 :
+                                  mem_ex_match_rs1_cur  ? 2'b01 :
+                                                          2'b00;
+    assign ex_forward_b_sel_cur = ex_ex_match_rs2_cur   ? 2'b10 :
+                                  mem_ex_match_rs2_cur  ? 2'b01 :
+                                                          2'b00;
 
     assign ex_operand1_sel_cur = id_ex_alu_src1_cur ? 2'b11 : ex_forward_a_sel_cur;
     assign ex_operand2_sel_cur = id_ex_alu_src2_cur ? 2'b11 : ex_forward_b_sel_cur;
 
-    assign ex_rs1_value_cur = (ex_forward_a_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
+    // rs1/rs2 value selection honors the live-load forward first, then
+    // regular EX/MEM and MEM/WB forwards, then the RF output.
+    assign ex_rs1_value_cur = ex_load_match_rs1_cur           ? mem_load_data_cur :
+                              (ex_forward_a_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
                               (ex_forward_a_sel_cur == 2'b01) ? mem_wb_forward_data_cur :
                                                                 id_ex_rs1_rdata_cur;
-    assign ex_rs2_value_cur = (ex_forward_b_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
+    assign ex_rs2_value_cur = ex_load_match_rs2_cur           ? mem_load_data_cur :
+                              (ex_forward_b_sel_cur == 2'b10) ? ex_mem_forward_data_cur :
                               (ex_forward_b_sel_cur == 2'b01) ? mem_wb_forward_data_cur :
                                                                 id_ex_rs2_rdata_cur;
 
@@ -817,8 +1113,17 @@ module hart #(
                                     ~id_ex_illegal_inst_cur &
                                     ~id_ex_ebreak_cur &
                                     ~ex_pc_misalign_trap_cur;
-    assign bp_update_index_cur    = id_ex_pc_cur[BP_INDEX_W + 1:2];
-    assign bp_update_tag_cur      = id_ex_pc_cur[31:BP_INDEX_W + 2];
+    assign bp_update_set_cur      = id_ex_pc_cur[BP_SET_W + 1:2];
+    assign bp_update_tag_cur      = id_ex_pc_cur[31:BP_SET_W + 2];
+    assign bp_update_way0_hit_cur = bp_valid0_cur[bp_update_set_cur] &
+                                    (bp_tags0_cur[bp_update_set_cur] == bp_update_tag_cur);
+    assign bp_update_way1_hit_cur = bp_valid1_cur[bp_update_set_cur] &
+                                    (bp_tags1_cur[bp_update_set_cur] == bp_update_tag_cur);
+    assign bp_update_way_sel_cur  = bp_update_way1_hit_cur ? 1'b1 :
+                                    bp_update_way0_hit_cur ? 1'b0 :
+                                    ~bp_valid0_cur[bp_update_set_cur] ? 1'b0 :
+                                    ~bp_valid1_cur[bp_update_set_cur] ? 1'b1 :
+                                    bp_repl_cur[bp_update_set_cur];
 
     assign ex_mem_valid_next        = id_ex_valid_cur;
     assign ex_mem_pc_next           = id_ex_pc_cur;
@@ -982,7 +1287,14 @@ module hart #(
             imem_pending_pc_cur <= 32'd0;
             imem_pending_pred_taken_cur <= 1'b0;
             imem_pending_pred_target_cur <= 32'd0;
-            bp_valid_cur <= {BP_ENTRIES{1'b0}};
+            bp_valid0_cur <= {BP_SETS{1'b0}};
+            bp_valid1_cur <= {BP_SETS{1'b0}};
+            bp_repl_cur <= {BP_SETS{1'b0}};
+            bp_pht_valid_cur <= {PHT_ENTRIES{1'b0}};
+            bp_ghr_cur   <= {PHT_INDEX_W{1'b0}};
+
+            ras_head_cur  <= 3'd0;
+            ras_valid_cur <= 1'b0;
 
             if_id_valid_cur <= 1'b0;
             if_id_pc_cur <= 32'd0;
@@ -990,6 +1302,7 @@ module hart #(
             if_id_inst_cur <= 32'd0;
             if_id_pred_taken_cur <= 1'b0;
             if_id_pred_target_cur <= 32'd0;
+            if_id_pht_index_cur <= {PHT_INDEX_W{1'b0}};
 
             id_ex_valid_cur <= 1'b0;
             id_ex_pc_cur <= 32'd0;
@@ -1019,6 +1332,7 @@ module hart #(
             id_ex_ebreak_cur <= 1'b0;
             id_ex_pred_taken_cur <= 1'b0;
             id_ex_pred_target_cur <= 32'd0;
+            id_ex_pht_index_cur <= {PHT_INDEX_W{1'b0}};
 
             ex_mem_valid_cur <= 1'b0;
             ex_mem_pc_cur <= 32'd0;
@@ -1086,6 +1400,7 @@ module hart #(
             if_id_inst_cur <= 32'd0;
             if_id_pred_taken_cur <= 1'b0;
             if_id_pred_target_cur <= 32'd0;
+            if_id_pht_index_cur <= {PHT_INDEX_W{1'b0}};
 
             id_ex_valid_cur <= 1'b0;
             id_ex_pc_cur <= 32'd0;
@@ -1115,6 +1430,7 @@ module hart #(
             id_ex_ebreak_cur <= 1'b0;
             id_ex_pred_taken_cur <= 1'b0;
             id_ex_pred_target_cur <= 32'd0;
+            id_ex_pht_index_cur <= {PHT_INDEX_W{1'b0}};
 
             ex_mem_valid_cur <= 1'b0;
             ex_mem_pc_cur <= 32'd0;
@@ -1169,23 +1485,84 @@ module hart #(
             mem_wb_misalign_trap_cur <= 1'b0;
             mem_wb_ebreak_cur <= 1'b0;
         end else if (~halted_cur) begin
+            // RAS update. Push on accepted JAL-with-link, pop on accepted
+            // JALR-with-link-source. Both may fire in the same cycle for
+            // coroutine-style swap forms, but our detection excludes that
+            // case (pop requires rd != rs1 or rd == 0).
+            if (ras_push_fire_cur) begin
+                ras_stack_cur[ras_head_cur] <= imem_resp_pc_cur + 32'd4;
+                ras_head_cur  <= ras_head_cur + 3'd1;
+                ras_valid_cur <= 1'b1;
+            end else if (ras_pop_fire_cur) begin
+                ras_head_cur <= ras_head_cur - 3'd1;
+                // Track emptiness: after popping, if head will be 0, mark invalid.
+                if (ras_head_cur == 3'd1)
+                    ras_valid_cur <= 1'b0;
+            end
+
             if (bp_update_cur) begin
-                bp_valid_cur[bp_update_index_cur] <= 1'b1;
-                bp_tags_cur[bp_update_index_cur] <= bp_update_tag_cur;
-                bp_targets_cur[bp_update_index_cur] <= ex_control_target_cur;
-                if (~bp_valid_cur[bp_update_index_cur] ||
-                    (bp_tags_cur[bp_update_index_cur] != bp_update_tag_cur)) begin
-                    bp_counters_cur[bp_update_index_cur] <= bp_actual_taken_cur ? 2'b10 : 2'b01;
-                end else if (bp_actual_taken_cur) begin
-                    if (bp_counters_cur[bp_update_index_cur] != 2'b11)
-                        bp_counters_cur[bp_update_index_cur] <= bp_counters_cur[bp_update_index_cur] + 1'b1;
+                bp_repl_cur[bp_update_set_cur] <= ~bp_update_way_sel_cur;
+                if (~bp_update_way_sel_cur) begin
+                    bp_valid0_cur[bp_update_set_cur] <= 1'b1;
+                    bp_tags0_cur[bp_update_set_cur] <= bp_update_tag_cur;
+                    bp_targets0_cur[bp_update_set_cur] <= ex_control_target_cur;
+                    if (~bp_update_way0_hit_cur) begin
+                        bp_counters0_cur[bp_update_set_cur] <=
+                            bp_actual_taken_cur ? 2'b10 : 2'b01;
+                    end else if (bp_actual_taken_cur) begin
+                        if (bp_counters0_cur[bp_update_set_cur] != 2'b11)
+                            bp_counters0_cur[bp_update_set_cur] <=
+                                bp_counters0_cur[bp_update_set_cur] + 1'b1;
+                    end else begin
+                        if (bp_counters0_cur[bp_update_set_cur] != 2'b00)
+                            bp_counters0_cur[bp_update_set_cur] <=
+                                bp_counters0_cur[bp_update_set_cur] - 1'b1;
+                    end
                 end else begin
-                    if (bp_counters_cur[bp_update_index_cur] != 2'b00)
-                        bp_counters_cur[bp_update_index_cur] <= bp_counters_cur[bp_update_index_cur] - 1'b1;
+                    bp_valid1_cur[bp_update_set_cur] <= 1'b1;
+                    bp_tags1_cur[bp_update_set_cur] <= bp_update_tag_cur;
+                    bp_targets1_cur[bp_update_set_cur] <= ex_control_target_cur;
+                    if (~bp_update_way1_hit_cur) begin
+                        bp_counters1_cur[bp_update_set_cur] <=
+                            bp_actual_taken_cur ? 2'b10 : 2'b01;
+                    end else if (bp_actual_taken_cur) begin
+                        if (bp_counters1_cur[bp_update_set_cur] != 2'b11)
+                            bp_counters1_cur[bp_update_set_cur] <=
+                                bp_counters1_cur[bp_update_set_cur] + 1'b1;
+                    end else begin
+                        if (bp_counters1_cur[bp_update_set_cur] != 2'b00)
+                            bp_counters1_cur[bp_update_set_cur] <=
+                                bp_counters1_cur[bp_update_set_cur] - 1'b1;
+                    end
+                end
+
+                // PHT update: 2-bit saturating counter at the index that was
+                // used at fetch (captured in id_ex_pht_index_cur). Only
+                // conditional branches contribute to global history; JAL/JALR
+                // are unconditional and would just bias the GHR.
+                if (id_ex_branch_cur) begin
+                    bp_pht_valid_cur[id_ex_pht_index_cur] <= 1'b1;
+                    if (bp_actual_taken_cur) begin
+                        if (~bp_pht_valid_cur[id_ex_pht_index_cur])
+                            bp_pht_cur[id_ex_pht_index_cur] <= 2'b10;
+                        else if (bp_pht_cur[id_ex_pht_index_cur] != 2'b11)
+                            bp_pht_cur[id_ex_pht_index_cur] <=
+                                bp_pht_cur[id_ex_pht_index_cur] + 1'b1;
+                    end else begin
+                        if (~bp_pht_valid_cur[id_ex_pht_index_cur])
+                            bp_pht_cur[id_ex_pht_index_cur] <= 2'b00;
+                        else if (bp_pht_cur[id_ex_pht_index_cur] != 2'b00)
+                            bp_pht_cur[id_ex_pht_index_cur] <=
+                                bp_pht_cur[id_ex_pht_index_cur] - 1'b1;
+                    end
+                    // Shift the actual outcome into the GHR.
+                    bp_ghr_cur <= {bp_ghr_cur[PHT_INDEX_W - 2:0], bp_actual_taken_cur};
                 end
             end
 
             if (ex_redirect_cur)
+                pc_cur <= pc_next;
+            else if (id_redirect_cur)
                 pc_cur <= pc_next;
             else if (imem_resp_late_redirect_cur)
                 pc_cur <= imem_resp_static_pred_target_cur;
@@ -1204,7 +1581,7 @@ module hart #(
                 imem_pending_pc_cur <= if_pc_cur;
                 imem_pending_pred_taken_cur <= if_pred_taken_cur;
                 imem_pending_pred_target_cur <= if_pred_target_cur;
-            end else if (ex_redirect_cur && imem_pending_cur) begin
+            end else if ((ex_redirect_cur | id_redirect_cur) && imem_pending_cur) begin
                 imem_pending_kill_cur <= 1'b1;
             end
 
@@ -1216,6 +1593,7 @@ module hart #(
                 if_id_inst_cur <= 32'd0;
                 if_id_pred_taken_cur <= 1'b0;
                 if_id_pred_target_cur <= 32'd0;
+            if_id_pht_index_cur <= {PHT_INDEX_W{1'b0}};
 
                 id_ex_valid_cur <= 1'b0;
                 id_ex_pc_cur <= 32'd0;
@@ -1245,6 +1623,53 @@ module hart #(
                 id_ex_ebreak_cur <= 1'b0;
                 id_ex_pred_taken_cur <= 1'b0;
                 id_ex_pred_target_cur <= 32'd0;
+            id_ex_pht_index_cur <= {PHT_INDEX_W{1'b0}};
+            end else if (id_redirect_cur) begin
+                // ID-stage direct-branch/JAL mispredict: the branch instr
+                // still advances into EX (for retirement and BTB update),
+                // but the wrongly-fetched successor in IF (or pending imem)
+                // is squashed. Only the IF/ID bubble is lost - 1 cycle
+                // penalty instead of the 3 cycles an EX-stage redirect has.
+                if_id_valid_cur <= 1'b0;
+                if_id_pc_cur <= 32'd0;
+                if_id_pc_plus4_cur <= 32'd0;
+                if_id_inst_cur <= 32'd0;
+                if_id_pred_taken_cur <= 1'b0;
+                if_id_pred_target_cur <= 32'd0;
+            if_id_pht_index_cur <= {PHT_INDEX_W{1'b0}};
+
+                id_ex_valid_cur <= id_ex_valid_next;
+                id_ex_pc_cur <= id_ex_pc_next;
+                id_ex_pc_plus4_cur <= id_ex_pc_plus4_next;
+                id_ex_inst_cur <= id_ex_inst_next;
+                id_ex_rs1_raddr_cur <= id_ex_rs1_raddr_next;
+                id_ex_rs2_raddr_cur <= id_ex_rs2_raddr_next;
+                id_ex_rd_waddr_cur <= id_ex_rd_waddr_next;
+                id_ex_rs1_rdata_cur <= id_fwd_rs1_cur;
+                id_ex_rs2_rdata_cur <= id_fwd_rs2_cur;
+                id_ex_offset_cur <= id_ex_offset_next;
+                id_ex_opcode_cur <= id_ex_opcode_next;
+                id_ex_func3_cur <= id_ex_func3_next;
+                id_ex_func7_cur <= id_ex_func7_next;
+                id_ex_lui_cur <= id_ex_lui_next;
+                id_ex_pc_src_cur <= id_ex_pc_src_next;
+                id_ex_alu_op_cur <= id_ex_alu_op_next;
+                id_ex_mem_write_cur <= id_ex_mem_write_next;
+                id_ex_mem_read_cur <= id_ex_mem_read_next;
+                id_ex_mem_to_reg_cur <= id_ex_mem_to_reg_next;
+                id_ex_alu_src1_cur <= id_ex_alu_src1_next;
+                id_ex_alu_src2_cur <= id_ex_alu_src2_next;
+                id_ex_reg_write_cur <= id_ex_reg_write_next;
+                id_ex_jump_cur <= id_ex_jump_next;
+                id_ex_branch_cur <= id_ex_branch_next;  // keep flag so EX updates BTB
+                id_ex_illegal_inst_cur <= id_ex_illegal_inst_next;
+                id_ex_ebreak_cur <= id_ex_ebreak_next;
+                // Give EX the RESOLVED next-PC as the predicted next-PC so
+                // EX's redirect-compare remains consistent and does not fire
+                // for a direct branch already handled here.
+                id_ex_pred_taken_cur  <= id_control_taken_cur;
+                id_ex_pred_target_cur <= id_next_pc_cur;
+                id_ex_pht_index_cur   <= if_id_pht_index_cur;
             end else if (mem_stage_stall_cur) begin
                 if (imem_resp_accept_cur) begin
                     if_id_valid_cur <= if_id_valid_next;
@@ -1253,6 +1678,7 @@ module hart #(
                     if_id_inst_cur <= if_id_inst_next;
                     if_id_pred_taken_cur <= if_id_pred_taken_next;
                     if_id_pred_target_cur <= if_id_pred_target_next;
+                    if_id_pht_index_cur <= if_id_pht_index_next;
                 end
 
                 // Preserve the fully-resolved EX operands while this
@@ -1291,6 +1717,7 @@ module hart #(
                 id_ex_ebreak_cur <= 1'b0;
                 id_ex_pred_taken_cur <= 1'b0;
                 id_ex_pred_target_cur <= 32'd0;
+            id_ex_pht_index_cur <= {PHT_INDEX_W{1'b0}};
             end else begin
                 if_id_valid_cur <= if_id_valid_next;
                 if_id_pc_cur <= if_id_pc_next;
@@ -1298,6 +1725,7 @@ module hart #(
                 if_id_inst_cur <= if_id_inst_next;
                 if_id_pred_taken_cur <= if_id_pred_taken_next;
                 if_id_pred_target_cur <= if_id_pred_target_next;
+                if_id_pht_index_cur <= if_id_pht_index_next;
 
                 id_ex_valid_cur <= id_ex_valid_next;
                 id_ex_pc_cur <= id_ex_pc_next;
@@ -1327,6 +1755,7 @@ module hart #(
                 id_ex_ebreak_cur <= id_ex_ebreak_next;
                 id_ex_pred_taken_cur <= id_ex_pred_taken_next;
                 id_ex_pred_target_cur <= id_ex_pred_target_next;
+                id_ex_pht_index_cur <= id_ex_pht_index_next;
             end
 
             if (mem_stage_stall_cur) begin
